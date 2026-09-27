@@ -1,0 +1,170 @@
+# Rime dictionary
+# encoding: utf-8
+---
+name: symbols_ext
+version: "2026-09-25"
+sort: by_weight
+...
+✓	gou
+✔	gou
+☑	gou
+✕	cha
+✖	cha
+⓪	ling
+壹	yi
+Ⅰ	yi
+①	yi
+贰	er
+Ⅱ	er
+②	er
+叁	san
+Ⅲ	san
+③	san
+肆	si
+Ⅳ	si
+④	si
+伍	wu
+Ⅴ	wu
+⑤	wu
+陆	liu
+Ⅵ	liu
+⑥	liu
+柒	qi
+Ⅶ	qi
+⑦	qi
+捌	ba
+Ⅷ	ba
+⑧	ba
+玖	jiu
+Ⅸ	jiu
+⑨	jiu
+拾	shi
+Ⅹ	shi
+⑩	shi
+∫	ji fen
+∫	integral
+∞	wu xian
+∪	bing
+∩	jiao
+∅	kong
+∈	shuyu
+∠	jiao
+∥	pingxing
+α	alpha
+Α	alpha
+β	beta
+Β	beta
+γ	gamma
+Γ	gamma
+δ	delta
+Δ	delta
+ε	epsilon
+Ε	epsilon
+ζ	zeta
+Ζ	zeta
+η	eta
+Η	eta
+θ	theta
+Θ	theta
+ι	iota
+Ι	iota
+κ	kappa
+Κ	kappa
+λ	lambda
+Λ	lambda
+Μ	mu
+μ	mu
+ν	nu
+Ν	mu
+ξ	kxi
+Ξ	kxi
+ο	omicron
+Ο	omicron
+π	pi
+Π	pi
+ρ	rho
+Ρ	rho
+σ	sigma
+ς	sigma
+Σ	sigma
+τ	tau
+Τ	tau
+υ	upsilon
+Υ	upsilon
+φ	phi
+Φ	phi
+χ	chi
+Χ	chi
+ψ	psai
+Ψ	psai
+ω	omega
+Ω	omega
+⬆	shang
+⬇	xia
+⬅	zuo
+➡	you
+↖	zuo shang
+↗	you shang
+↘	you xia
+↙	zuo xia
+✔	dui
+✖	cuo
+©	ban quan
+©	copyright
+®	zhu ce shang biao
+®	register
+✉	xin xi
+❇	xue
+☆	star
+★	star
+✳	xing
+★	xing
+☆	xing
+☆	wu xing
+∞	wu qiong
+☯	taiji
+☯	yin yang
+♂	nan
+♂	man
+♂	men
+♁	nv
+♁	woman
+♁	women
++	jia	1300000
++	jia hao	6000
++	plus	0
+-	jian	130000
+-	jian hao	3600
+-	minus	0
+=	deng yu	267000
+=	deng hao	11000
+=	equal	0
+×	cheng hao	100000
+×	times	0
+÷	chu hao	13000
+÷	divide	0
+<	xiao yu	255000
+>	da yu	359000
+≠	bu deng yu	0
+≈	yue deng yu	0
+±	zheng fu hao	0
+≤	xiao yu deng yu	0
+≥	da yu deng yu	0
+%	bai fen hao	1600
+‰	qian fen hao	0
+√	gen hao	0
+¥	ren min bi	450000
+¥	rmb	0
+¥	yuan	0
+$	mei yuan	450000
+$	dollar	0
+€	ou yuan	200000
+€	euro	0
+£	ying bang	100000
+£	pound	0
+¢	cent	0
+¢	me fen	0
+₩	han yuan	0
+α	alfa	0
+ψ	psi	0
+Ψ	psi	0

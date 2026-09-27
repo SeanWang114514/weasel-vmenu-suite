@@ -1,0 +1,37 @@
+# 雾凇拼音个人扩展：v 菜单，2 剪贴板，3 收藏；Ctrl+` 兼容
+patch:
+  engine/processors:
+    - lua_processor@*menu_processor
+    - lua_processor@*select_character
+    - ascii_composer
+    - recognizer
+    - key_binder
+    - speller
+    - punctuator
+    - selector
+    - navigator
+    - express_editor
+  engine/translators:
+    - punct_translator
+    - script_translator
+    - lua_translator@*date_translator
+    - lua_translator@*lunar
+    - lua_translator@*uuid
+    - table_translator@custom_phrase
+    - table_translator@melt_eng
+    - table_translator@cn_en
+    - table_translator@radical_lookup
+    - lua_translator@*unicode
+    - lua_translator@*number_translator
+    - lua_translator@*calc_translator
+    - lua_translator@*force_gc
+    - lua_translator@*lua_menu
+    - lua_translator@*clipboard
+    - lua_translator@*favorite
+  recognizer/patterns/menu: "^[v`]$"
+  recognizer/patterns/clipboard: "^v2$"
+  recognizer/patterns/favorite: "^v3.*$"
+  punctuator/symbols/v2: []
+  punctuator/symbols/v3: []
+  key_binder/bindings/+:
+    - { when: always, accept: Control+grave, send: grave }
