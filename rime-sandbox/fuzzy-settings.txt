@@ -1,0 +1,7 @@
+# 前后鼻音模糊输入（fuzzy_filter.lua 读取）
+nasal=true
+nasal_an_ang=true
+nasal_en_eng=true
+nasal_in_ing=true
+nasal_ian_iang=true
+nasal_uan_uang=true

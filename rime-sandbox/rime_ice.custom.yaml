@@ -1,10 +1,18 @@
 # 雾凇拼音个人扩展（沙箱测试版）
 # 全部改动通过 patch 注入，不改动 rime_ice.schema.yaml 本体。
+#
+# 设计要点
+#   1. 内部编码全部使用纯字母（v / vset / vsetc / vsetf / vsetcmm …），
+#      与 symbols_v.yaml 的任何键都不冲突，因此不需要再改动 punctuator/symbols，
+#      v2 / v3 等原版符号编码保持完好。
+#   2. v → 4 进入「原符号模式」后，处理器完全放行，v 恢复原版行为
+#      （例如接着按 2 得到 v2 的「二」变体、按 a 得到 ā á ǎ à）。
 patch:
-  # 1) 处理器：菜单按键拦截必须排在 speller 之前
+  # 1) 处理器：v 菜单按键拦截必须排在 speller / selector 之前
   engine/processors:
     - lua_processor@*menu_processor
     - lua_processor@*select_character
+    - lua_processor@*smart_punct
     - ascii_composer
     - recognizer
     - key_binder
@@ -14,34 +22,38 @@ patch:
     - navigator
     - express_editor
 
-  # 2) 翻译器：菜单 / 剪贴板 / 收藏
+  # 2) 翻译器：菜单 / 设置 / 剪贴板 / 收藏（合并为一个，减少每键开销）
   engine/translators/+:
     - lua_translator@*lua_menu
-    - lua_translator@*clipboard
-    - lua_translator@*favorite
 
   # 3) 滤镜：fuzzy_filter 必须排最前（要在 corrector 读取 ［拼音］ 注释之前拿到拼音）；
-  #         输入为 v 时压制普通中英文候选仍排最后
+  #         phrase_first（词组优先）排在 v_filter 之后、predict/pin_cand 之前：
+  #         先把词组整体提到最前，再让「预测词 / 用户置顶」压回第 1 位；
+  #         它是 long_word_filter 的超集，long_word 因此从链上撤掉；
+  #         v 模式下压制普通中英文候选仍排最后
   engine/filters:
     - lua_filter@*fuzzy_filter
     - lua_filter@*corrector
     - reverse_lookup_filter@radical_reverse_lookup
     - lua_filter@*autocap_filter
     - lua_filter@*v_filter
+    - lua_filter@*phrase_first
+    - lua_filter@*predict_filter
     - lua_filter@*pin_cand_filter
-    - lua_filter@*long_word_filter
     - lua_filter@*reduce_english_filter
+    - lua_filter@*en_gate
+    - lua_filter@*smart_punct_filter
     - simplifier@emoji
     - simplifier@traditionalize
     - lua_filter@*search@radical_pinyin
     - uniquifier
     - lua_filter@*menu_filter
 
-  # 4) 识别器：让 v / v2 / v3 成为独立输入段
-  recognizer/patterns/vmenu: "^v$"
-  recognizer/patterns/clipboard: "^v2$"
-  recognizer/patterns/favorite: "^v3.*$"
+  # 4) 候选框：一页显示更多候选（配合 weasel 的 max_width 换行，形成多行候选框）
+  menu/page_size: 36 #9 列 × 4 行（配合 weasel 的 max_width）
 
-  # 5) 让出 v2 / v3 这两个符号编码给剪贴板与收藏
-  punctuator/symbols/v2: []
-  punctuator/symbols/v3: []
+  # 部件拆字：uU 前缀改成单个 u（按 u 后直接输入部首拼音名，unvzi → 好）
+  radical_lookup/prefix: u
+  "recognizer/patterns/radical_lookup": "^u[a-z]+$"
+  # 智能标点配套：裸域名增强识别（google.com / 192.168.1.1 / a.b.c 原文上屏）
+  "recognizer/patterns/url": "^(www[.]|https?:|ftp[.:]|mailto:|file:).*$|^[a-z0-9]+([.][a-z0-9-]+)+.*$"

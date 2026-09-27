@@ -1,0 +1,2 @@
+smart_punct=true
+smart_punct_log=true

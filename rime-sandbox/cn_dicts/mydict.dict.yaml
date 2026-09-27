@@ -14,6 +14,8 @@ sort: by_weight
 ...
 
 # 下面开始写你的词，一行一个
+栏	lan	100000
+骇爪	hai zhua	100000
 VibeCoding	vibe coding	100000
 王思溜	wang si liu	100000
 甄姬不是假机	zhen ji bu shi jia ji	100000

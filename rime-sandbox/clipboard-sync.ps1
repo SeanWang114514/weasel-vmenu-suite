@@ -1,8 +1,19 @@
 param(
-  [string]$RimeDir = 'D:\rime-sandbox',
+  [string]$RimeDir = '',
   [int]$Max = 50,
   [int]$IntervalMs = 1000
 )
+# Resolve the Rime user dir when not passed explicitly:
+# env override -> registry RimeUserDir -> %APPDATA%\Rime -> legacy dev dir.
+if (-not $RimeDir) { $RimeDir = $env:RIME_DIR }
+if (-not $RimeDir) {
+  try {
+    $reg = Get-ItemProperty -Path 'HKCU:\Software\Rime\Weasel' -Name RimeUserDir -ErrorAction Stop
+    if ($reg.RimeUserDir) { $RimeDir = $reg.RimeUserDir }
+  } catch {}
+}
+if (-not $RimeDir) { $RimeDir = Join-Path $env:APPDATA 'Rime' }
+if (-not (Test-Path -LiteralPath $RimeDir) -and (Test-Path -LiteralPath 'D:\rime-sandbox')) { $RimeDir = 'D:\rime-sandbox' }
 # Clipboard history sync - fully independent of the IME process.
 # The IME side (lua/vmenu_core.lua) ONLY reads/writes this text file; it never
 # spawns a process, which is what used to freeze the input method.
@@ -27,6 +38,18 @@ param(
 # scripts as ANSI, which breaks quoting when non-ASCII comments are present.
 
 $ErrorActionPreference = 'SilentlyContinue'
+
+# Single instance + a cheap liveness probe. The settings window supervises this
+# script; it used to test liveness with Get-CimInstance Win32_Process (176ms per
+# call, on its UI thread). Holding a named mutex for our whole lifetime lets the
+# supervisor answer with Mutex::OpenExisting (~0.1ms).
+$syncMutex = New-Object System.Threading.Mutex($false, 'RimeClipboardSync')
+$syncFirst = $false
+try { $syncFirst = $syncMutex.WaitOne(0) }
+catch [System.Threading.AbandonedMutexException] { $syncFirst = $true }
+catch { $syncFirst = $false }
+if (-not $syncFirst) { exit 0 }
+
 New-Item -ItemType Directory -Force -Path $RimeDir | Out-Null
 $cache = Join-Path $RimeDir 'clipboard-cache.txt'
 $utf8 = New-Object Text.UTF8Encoding($false)

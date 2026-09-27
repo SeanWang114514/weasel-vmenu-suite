@@ -1,0 +1,4 @@
+# v 功能菜单设置
+clip_page=20
+misinput_protect=true
+misinput_interval=10

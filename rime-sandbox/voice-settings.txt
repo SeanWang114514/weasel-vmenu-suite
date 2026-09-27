@@ -1,0 +1,3 @@
+# 语音输入设置（voice-overlay.py 读取）
+punct_to_space=true
+hotkey=ctrl+win

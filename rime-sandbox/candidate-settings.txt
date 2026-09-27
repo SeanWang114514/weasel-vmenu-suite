@@ -1,0 +1,2 @@
+# 中文模式下的英文候选（en_gate.lua 读取）
+en_candidates=true
