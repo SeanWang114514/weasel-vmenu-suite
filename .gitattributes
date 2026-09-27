@@ -1,0 +1,28 @@
+# 这是个 Windows-only 的套件，换行符必须锁死：
+# 发布的 .bat / .ps1 必须是 CRLF，二进制不能被当成文本处理。
+* text=auto
+
+*.bat  text eol=crlf
+*.cmd  text eol=crlf
+*.ps1  text eol=crlf
+*.cs   text eol=crlf
+*.iss  text eol=crlf
+
+# 词库/配置：文本，但不要动它们的换行（rime 会自己处理）
+*.yaml text
+*.dict.yaml text
+*.txt  text
+*.lua  text
+*.md   text
+*.py   text
+
+# 二进制
+*.exe   binary
+*.dll   binary
+*.gguf  binary
+*.zip   binary
+*.7z    binary
+*.png   binary
+*.ico   binary
+*.db    binary
+*.bin   binary
