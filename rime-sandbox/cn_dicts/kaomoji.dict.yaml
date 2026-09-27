@@ -1,0 +1,312 @@
+# Rime dictionary
+# encoding: utf-8
+---
+name: kaomoji
+version: "2026-09-25"
+sort: by_weight
+...
+# 已精简：保留常用短颜文字，每编码最多 6 条
+ﾟ( ☉д⊙)	a	0
+Σ<(=⊙▽⊙)"	a	0
+⊙▂⊙	a	0
+⊙０⊙	a	0
+(>_<)	a	0
+w(ﾟДﾟ)w	aa	0
+╮(￣▽￣")╭	ai	0
+╮（﹀＿﹀）╭	ai	0
+(´･Д･)」	ai	0
+╮(╯_╰)╭	ai	0
+ｍ(＿　＿)ｍ	bai	0
+ヾ(￣▽￣)Bye~Bye~	bai	0
+(o_ _)ﾉ	bai bai	0
+\(￣︶￣*\))抱抱~	bao bao	0
+\(￣︶￣)/ 抱抱~	bao bao	0
+＼（￣︶￣）／	bao bao	0
+\(T︶T*\))抱抱~	bao bao	0
+<(=′▽')爻 (`▽｀=)>	bao bao	0
+ヾ(≧▽≦*)o	bao xiao	0
+╭∩╮(︶︿︶）╭∩╮鄙视你！	bi shi	0
+<(=￢_￢=)>	bi shi	0
+(＞﹏＜)	bie	0
+(＠_＠;)	bu dong	0
+(＠_＠;)? [不懂]	bu dong	0
+<(=＠_＠;=)?>	bu dong	0
+(｡•́︿•̀｡)	bu kai xin	0
+(๑´╹‸╹`๑)	bu kai xin	0
+（＃￣～￣＃）	bu man	0
+[不满](*￣︿￣)	bu man	0
+(*￣︿￣)	bu man	0
+[不屑](￣_,￣ )	bu xie	0
+( ￣ー￣)	bu xie	0
+(￣_,￣ )	bu xie	0
+凸(艹皿艹=)>	cao	0
+凸(艹皿艹 )	cao	0
+┌|*´∀｀|┘	chou	0
+<(=￣c￣)y▂ξ。。。 抽烟	chou yan	0
+（￣ c￣）y▂ξ。。。	chou yan	0
+(￣旦￣；)	dai	0
+━┳━　━┳━	dai	0
+<(=⊙_⊙=)>	dai	0
+(￣△￣；)	dai	0
+━━(￣ー￣*|||━━	dan ding	0
+淡━━(￣ー￣*|||━━定	dan ding	0
+<(=￣.￣=)>	dan ding	0
+<(￣︶￣)>	de yi	0
+<(▰˘◡˘▰)>	de yi	0
+&lt;(￣ˇ￣)/	de yi	0
+v(￣︶￣)y	de yi	0
+(*˘︶˘*)	de yi	0
+<(￣ˇ￣)/	de yi	0
+(。_。) [低头]	di tou	0
+(。﹏。) [低头]	di tou	0
+(。﹏。)	di tou	0
+(．_．〃）ゝ…	di tou	0
+(๑◔‿◔๑)	ding	0
+<(=﹁"﹁=)>	ding	0
+(｀･ω･)	ding	0
+d=====(￣▽￣*)b	ding	0
+(`・ω・´)	ding	0
+(•̀⌄•́）	ding	0
+o(￣ε￣*)	du zui	0
+（○｀ 3′○）	du zui	0
+(￣3￣)	du zui	0
+（○｀ 3′○） [嘟嘴]	du zui	0
+o(￣ε￣*) [嘟嘴]	du zui	0
+o(￣ε￣=)>	du zui	0
+（。・＿・。）ﾉ	dui bu qi	0
+（＞人＜；）	dui bu qi	0
+<(＿　＿)>	dui bu qi	0
+对不起~ <(＿　＿)>	dui bu qi	0
+⊙︿⊙	e	0
+(⊙﹏⊙)	e	0
+<(ˉ▽ˉ；=)>	e	0
+(๑-﹏-๑)	e	0
+o(` · ~ · ′。)o	e	0
+( -д-)	e	0
+(✩´•௰•`✩)	en	0
+嗯！o(￣︶￣)n	en	0
+嗯~ o(*￣▽￣*)o	en	0
+( ´◔ ‸◔`)	en	0
+O(∩_∩)O嗯！	en	0
+＜（＠￣︶￣＠）＞	en en	0
+(♡˙︶˙♡)	en en	0
+翻桌！(╯‵□′)╯︵┻━┻	fan zhuo	0
+<(=┘￣Д￣)┘╧═╧	fan zhuo	0
+┻━┻︵╰(‵□′)╯︵┻━┻	fan zhuo	0
+[飞吻] (*￣3￣)╭	fei wen	0
+<(=￣3￣)╭❤	fei wen	0
+(*￣3￣)╭	fei wen	0
+(￣▽￣)～■干杯□～(￣▽￣)	gan bei	0
+[]~(￣▽￣)~* 干杯！	gan bei	0
+[]~<(=￣▽￣~=)>	gan bei	0
+[]~(￣▽￣)~*	gan bei	0
+φ(゜▽゜*)♪	gao xing	0
+( ˘•ω•˘ )	ha	0
+(＃°Д°)	ha	0
+O口O!	ha	0
+(,,Ò‿Ó,,)	ha	0
+＞▽＜	ha	0
+(・∀・)	ha	0
+>^.^<	ha ha	0
+(〃'▽'〃)	ha ha	0
+φ(≧ω≦*)♪	ha ha	0
+\(≧▽≦)/	ha ha	0
+ヾ(≧▽≦*)o	ha ha	0
+(￣∇￣)	ha ha	0
+(゜∀。)	ha ha ha	0
+\(//?//)\	hai xiu	0
+o(*////▽////*)q	hai xiu	0
+<(▰▰￣▽￣▰▰)>	hai xiu	0
+<(＃￣▽￣＃)>	hai xiu	0
+(*/ω＼*)	hai xiu	0
+(〃∀〃)	hai xiu	0
+(￣▽￣|||)	han	0
+Σ( ° △ °|||)︴	han	0
+(寒￣ii￣)彡…彡…彡	han	0
+(￣_￣|||)	han	0
+|(*′口`)	han	0
+(￣▽￣")	han	0
+（゜▽＾*））	hao	0
+<(=o゜▽゜)o☆	hao	0
+o(*^▽^*)o [好~~]	hao	0
+＼（⌒∇⌒）／	hao	0
+(。_。)	hao ba	0
+(・-・*)	hao ba	0
+好吧…… ╮(╯-╰)╭	hao ba	0
+(๑´ڡ`๑)	hao chi	0
+(u‿ฺu✿ฺ)	hao de	0
+（゜▽＾*））	hao de	0
+╭∩╮（￣▽￣）╭∩╮	he he	0
+o(*￣▽￣*)o	he he	0
+<(=￣▽￣"=)>	he he	0
+(｡ŏ_ŏ)	heng	0
+( －з)	heng	0
+c(　╹^╹)	heng	0
+(ε－ )	heng	0
+(`ε´ )	heng	0
+(；′⌒`)	heng	0
+<(=ˉ^ˉ=)>	heng heng	0
+(；′⌒`)	heng heng	0
+(＠￣ー￣＠)	heng heng	0
+o(*￣▽￣*)o	hh	0
+(￣▽￣")	hh	0
+^-^	hhh	0
+^O^	hhh	0
+(*°▽°*)八(*°▽°*)♪	ji zhang	0
+( ￣ー￣)人(^▽^ )	ji zhang	0
+(ง •_•)ง	jia you	0
+٩( 'ω' )و	jia you	0
+╭( ･ㅂ･)و ̑̑	jia you	0
+*\(^_^)/*	jia you	0
+加油！(o^^)oo(^^o)	jia you	0
+╭( ･ㅂ･)و	jia you	0
+(￣～￣) 嚼！	jiao	0
+<(=￣～￣=)>	jiao	0
+(((　ﾟдﾟ)))	jing ya	0
+(´ﾟДﾟ`)	jing ya	0
+( ﾟдﾟ)	jing ya	0
+⊙▽⊙	jing ya	0
+( ;ﾟдﾟ)	jing ya	0
+Σ(゜д゜=!)>	jing ya	0
+o<(=╯□╰=)>o	jiong	0
+( ´_ゝ`)	jiong	0
+（´Д`）	jiong	0
+〈（＿　＿）〉	ju gong	0
+o(*^▽^*)┛	ju shou	0
+_( ﾟДﾟ)ﾉ	ju shou	0
+o(*^▽^*)┛[举手]	ju shou	0
+(๑•́ ₃ •̀๑)	ke ai	0
+n(*≧▽≦*)n	ke ai	0
+( ﾟωﾟ)	ke ai	0
+(๑❛ᴗ❛๑)	ke ai	0
+T^T"///	ku	0
+TAT	ku	0
+( ;`д´; )	ku	0
+(٥﹏٥` )	ku	0
+ಥ_ಥ	ku	0
+( >﹏<。)～呜呜呜……	ku	0
+(￣o￣) . z Z	kun	0
+<(=﹌○﹌=)>	kun	0
+(┳＿┳)...	lei	0
+/(ㄒoㄒ)/~~	lei	0
+(ρ_・).。	lei	0
+<(=┳＿┳=)>	lei	0
+（。＾▽＾）	li hai	0
+o(*￣︶￣*)o	man zu	0
+o(￣ˇ￣)o	man zu	0
+(๑¯∀¯๑)	man zu	0
+o( =0,·ω·=0, )m	mao	0
+喵~o( =∩ω∩= )m	miao	0
+~o( =∩ω∩= )m	miao	0
+₍˄·͈༝·͈˄₎◞	miao	0
+≡ω≡	miao	0
+喵~ ＞▽＜	miao	0
+ฅ(^ω^ฅ)	miao	0
+<( ￣︶￣)╱(._. )	mo mo	0
+╰(￣ω￣ｏ) [摸摸头]	mo mo	0
+mua! (*╯3╰)	mua	0
+(*╯3╰)	mua	0
+ヾ(´･ω･｀)ﾉ	ni hao	0
+(＾o＾)ﾉ	ni hao	0
+(｡･ω･｡)ﾉ	ni hao	0
+(o#゜ 曲゜)o	nu	0
+(#‵′)	nu	0
+(｡•ˇ‸ˇ•｡)	nu	0
+( ` ・´)	o	0
+￣o￣	o	0
+ｍ(o・ω・o)ｍ	o	0
+<(='_'=)?>	o	0
+<(=°ο°=)>	o	0
+(⊙o⊙)？	o	0
+○|￣|_	orz	0
+☆乀(‵-′ ｏ=)> Pia!	pia	0
+(*"･∀･)ﾉ――◎	pia	0
+(* ˘ ³˘)♡	qin qin	0
+o(*￣3￣)o	qin qin	0
+[亲亲]o(*￣3￣)o	qin qin	0
+(* ￣)(￣▽￣*)ゞ[亲亲]	qin qin	0
+&lt;(－︿－)&gt;	sheng qi	0
+(ー`´ー)	sheng qi	0
+<(－︿－)>	sheng qi	0
+(￣皿￣)	sheng qi	0
+( `ー´)	sheng qi	0
+ヽ(•̀﹏•́ )ゝ	shi	0
+◟(⁰𠆢⁰∗)	shi	0
+(′д｀ )…彡…彡	shuai	0
+(¦3ꇤ[▓▓]	shui jiao	0
+ヾ（≧∇≦）〃	tai bang le	0
+ㄟ(≧◇≦)ㄏ	tai bang le	0
+…（⊙＿⊙；）…	tao	0
+ε=0,ε=0,┏( >_<)┛	tao	0
+ヽ(ﾟ∀ﾟ*)ﾉ━━━ｩ♪	tao	0
+♪(´∇`*)	tian a	0
+喂！(#`O′)	wei	0
+(#`O′)	wei	0
+（｀Δ´）！	wei	0
+╥﹏╥...	wei qu	0
+σ（⌒ー⌒）	wo	0
+[我？]σ(· ·?)	wo	0
+v(｡･ω･｡)	wo	0
+(。﹏。*) 我错了……	wo cuo le	0
+(。﹏。*)	wo cuo le	0
+( ›´ω`‹ )	wo cuo le	0
+(～o￣▽￣)～o ~。。。	wo lai le	0
+我来了~(～￣▽￣)～	wo lai le	0
+~(～￣▽￣)～	wo lai le	0
+╮<(=╯-╰=)>╭	wu nai	0
+╯▂╰	wu nai	0
+╯︿╰	wu nai	0
+╮(╯▽╰)╭	wu nai	0
+[无奈]╮(╯-╰)╭	wu nai	0
+＾▼＾	xiao	0
+＞▽＜	xiao	0
+(´･◡･｀)	xiao	0
+（*∩_∩*）	xiao	0
+≧▽≦	xiao	0
+(^﹏^)"	xiao	0
+谢啦!!☆⌒(*＾-゜)v	xie	0
+谢啦!!☆⌒(*＾-゜)v	xie xie	0
+( ╯▽╰)[欣慰]	xin wei	0
+( ╯▽╰)	xin wei	0
+o(*￣▽￣*)o	xing fu	0
+σ　σ	yan jing	0
+(-@y@)	yan jing	0
+(-@y@) [扶眼镜]	yan jing	0
+<(=￣ε￣ = ￣3￣=)>	yao tou	0
+(＾－＾)V	ye	0
+^_^)y	ye	0
+✌(◔౪◔)✌	ye	0
+∩__∩y耶~~^^	ye	0
+(*￣︶￣)y	ye	0
+(*￣▽￣)y	ye	0
+|ω･`)	yi	0
+(・∀・(・∀・(・∀・*)	yi	0
+晕！@o@"	yun	0
+@_@	yun	0
+(*^-ﾟ)	zai jian	0
+(。・_・)/~~~	zai jian	0
+┏(＾0＾)┛	zai jian	0
+ヾﾉ｡ÒㅅÓ)ﾉｼ	zai jian	0
+(ﾟ∇^*)	zai jian	0
+(((o(*ﾟ▽ﾟ*)o)))	zan	0
+ο(=·ω＜=)ρ⌒☆[媚眼]	zha yan	0
+(￣︶￣)↗	zhang	0
+涨(￣︶￣)↗	zhang	0
+(○´･д･)ﾉ	zhen jing	0
+[就是他!] (＠｀д′)	zhi	0
+[就你好了~] (＠゜▽゜)	zhi	0
+&lt;(￣ ﹌ ￣)@m	zhi	0
+<(=﹁"﹁=)σ	zhi	0
+<(￣ ﹌ ￣)@m	zhi	0
+(﹁ ﹁ )σ[那边那个]	zhi	0
+(,, Ծ ‸ Ծ,, )	zhou mei	0
+[皱眉](-"-)	zhou mei	0
+_(:3」∠)_	zhou mei	0
+(ー`´ー)	zhou mei	0
+( ´д`)	zhou mei	0
+^(*￣(oo)￣)^	zhu	0
+[猪]^(*￣(oo)￣)^	zhu	0
+[抓狂]o(>@<)o	zhua kuang	0
+[抓狂]"o((>ω< ))o"	zhua kuang	0
+（￣︶￣）↗	zou	0
+<(╬￣皿￣)=○＃)３￣)>	zou	0

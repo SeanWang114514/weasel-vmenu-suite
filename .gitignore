@@ -1,0 +1,37 @@
+# 构建产物（不要在仓库里提交）
+out/
+stage/
+
+# 语音模型：单个文件 > 100MB，GitHub 硬限制，走 Release 附件或 下载Qwen模型.bat
+*.gguf
+
+# Rime 运行时产物 / 用户数据（部署时生成）
+**/build/
+*.userdb/
+*.userdb
+installation.yaml
+user.yaml
+*.log
+lua-probe.txt
+panel-probe.txt
+open-settings.flag
+
+# 语音降级后端（可选，未随包分发）
+vosk-model-*/
+vosk-model-*.zip
+
+# 开发/测试残留
+_tmp-session/
+shots/
+backup/
+_backup-*/
+_dict-staging/
+__pycache__/
+*.pyc
+ps2exe_pkg/
+*.bak
+*.bak.*
+repo/weasel-vmenu/
+
+# 打包脚手架（临时）
+*.iss.bak

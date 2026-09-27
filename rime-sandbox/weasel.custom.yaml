@@ -1,0 +1,8 @@
+customization:
+  distribution_code_name: Weasel
+  distribution_version: 0.17.4
+  generator: "Weasel::UIStyleSettings"
+  modified_time: "Sat Sep 12 20:53:37 2026"
+  rime_version: 1.13.1
+patch:
+  "style/color_scheme": steam

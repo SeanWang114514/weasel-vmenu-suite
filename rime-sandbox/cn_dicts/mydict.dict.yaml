@@ -1,0 +1,20 @@
+# Rime dictionary
+# encoding: utf-8
+#
+# 个人词库（自己加词用，不会被雾凇更新覆盖）
+# 格式：词语<Tab>拼音（空格分隔）<Tab>权重（可选，越大越靠前）
+# 示例：
+# 雾凇	wu song	100000
+# 打工人	da gong ren	10000
+#
+---
+name: mydict
+version: "2026-09-06"
+sort: by_weight
+...
+
+# 下面开始写你的词，一行一个
+VibeCoding	vibe coding	100000
+王思溜	wang si liu	100000
+甄姬不是假机	zhen ji bu shi jia ji	100000
+王修翊	wang xiu yi	100000

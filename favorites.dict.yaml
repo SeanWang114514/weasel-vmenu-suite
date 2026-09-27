@@ -1,0 +1,8 @@
+# Rime dictionary
+# encoding: utf-8
+# 单行收藏：完整内容<Tab>前三个字符（或字母、数字）
+---
+name: favorites
+version: "2026-09-06"
+sort: by_weight
+...

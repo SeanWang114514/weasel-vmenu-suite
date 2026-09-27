@@ -1,0 +1,10 @@
+# Rime dictionary
+# encoding: utf-8
+---
+name: favorites
+version: "2026-09-11"
+sort: by_weight
+...
+我的常用收货地址	我的常	100000
+test@example.com	tes	100000
+13800138000	138	100000

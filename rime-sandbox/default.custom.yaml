@@ -1,0 +1,15 @@
+customization:
+  distribution_code_name: Weasel
+  distribution_version: 0.17.0
+  generator: "Rime::SwitcherSettings"
+  modified_time: "Sun Sep  6 10:15:05 2026"
+  rime_version: 1.13.1
+patch:
+  schema_list:
+    - {schema: melt_eng}
+    - {schema: rime_ice}
+  #菜单
+  menu:
+    page_size: 9 #候选词个数
+  # 右Shift也能切换中英文（与左Shift行为一致：commit_code）
+  ascii_composer/switch_key/Shift_R: commit_code
