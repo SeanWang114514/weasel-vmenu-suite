@@ -1,4 +1,4 @@
-﻿# build-release.ps1 —— 组装发布树 -> 打 zip（rime-install 兼容）-> 编译 exe 直装包
+# build-release.ps1 —— 组装发布树 -> 打 zip（rime-install 兼容）-> 编译 exe 直装包
 #
 # 用法（在仓库任意位置）：
 #   powershell -File packaging\build-release.ps1                 # 完整构建（含模型）
@@ -33,6 +33,14 @@ if (-not (Test-Path (Join-Path $RimeSrc 'rime_ice.schema.yaml'))) {
   $alt = Join-Path $Root 'rime-sandbox'
   if (Test-Path (Join-Path $alt 'rime_ice.schema.yaml')) { $RimeSrc = $alt }
   else { throw "Rime source dir not found: $RimeSrc" }
+}
+
+# llama.cpp 运行时同样要能退回仓库内的副本：默认值指向开发者本机路径，
+# 全新 clone 的机器上没有那个目录，原来会直接 throw —— 从源码构建必挂。
+if (-not (Test-Path (Join-Path $LlamaSrc 'llama-server.exe'))) {
+  $altLlama = Join-Path $Root 'llama.cpp'
+  if (Test-Path (Join-Path $altLlama 'llama-server.exe')) { $LlamaSrc = $altLlama }
+  else { throw "llama runtime source not found: $LlamaSrc (set -LlamaSrc, or put a CPU build in $altLlama)" }
 }
 
 $Name  = "RimeVMenu-$Version"
