@@ -2,7 +2,10 @@ customization:
   distribution_code_name: Weasel
   distribution_version: 0.17.4
   generator: "Weasel::UIStyleSettings"
-  modified_time: "Sat Sep 12 20:53:37 2026"
+  modified_time: "Sat Sep 12 21:26:07 2026"
   rime_version: 1.13.1
 patch:
   "style/color_scheme": steam
+  "style/layout/max_width": 1100   # 一行 9 个候选（逻辑像素，实际按 150% 缩放渲染）
+  # 序号：整行候选都不显示序号（改用候选注释里的数字给第一行编号）
+  "style/label_format": " "   # 序号位置留空（数字改由候选注释显示）
