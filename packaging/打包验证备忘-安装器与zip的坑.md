@@ -120,8 +120,52 @@ Start-Process out\RimeVMenu-Setup-1.0.0.exe -ArgumentList `
 >    `WeaselServer`；卸载会把这些再撤掉。测完记得检查/还原：
 >    `HKCU\...\Run\RimeVMenuWatcher`、`vmenu-tray-setup.ps1`、`VMenu.exe start`。
 
-## 5. 还没做的一步
+## 5. 发布结果（已完成）
 
-产物已经在 `out\`（zip + exe，各带 971MB 模型），但**还没推到 GitHub、
-也没建 Release**：`weasel-vmenu-suite` 这个仓库目前**在 GitHub 上不存在**
-（`RimeVMenu.iss` 里的 `AppPublisherURL` 已经指向它）。下一个会话接手时从这里继续。
+- 仓库（公开）：<https://github.com/SeanWang114514/weasel-vmenu-suite>
+  —— 281 个文件，约 290MB，分支 `main`，`.gitignore` + `.gitattributes` 已就位。
+- Release：<https://github.com/SeanWang114514/weasel-vmenu-suite/releases/tag/v1.0.0>
+  —— `RimeVMenu-Setup-1.0.0.exe`（1,195,182,480 字节）与
+  `RimeVMenu-1.0.0.zip`（1,199,917,490 字节），远端大小与本地逐字节一致。
+- 构建产物已重建并校验：zip sha256 `7FC46D27EFD936FD…`、exe sha256 `469B39DC81394DD2…`。
+- **博客介绍文章**（含下载地址 + 项目地址）已发布：
+  <https://seanwang114514.github.io/2026/09/30/weasel-vmenu-suite/>
+  —— 源文件在 `SeanWang114514/SeanWang114514.github.io` 的
+  `_posts/2026-09-30-weasel-vmenu-suite.markdown`，浅克隆留在工作区 `_tmp-blog\`
+  （以后改文章直接在里面 `git pull --rebase && git commit && git push`）。
+  - 版式对齐站内既有文章：front matter（`layout: post` / `subtitle` / `catalog: true` / `tags`）、
+    GitHub 双按钮、「快速下载」卡片、`<!--more-->`、架构 SVG 图（720 宽、`#1677FF` 强调色）、
+    从源码构建、已知限制、开源致谢。
+  - **两个坑**：① Jekyll 默认**不发布「未来日期」的文章**（`future: false`），日期必须早于构建时间；
+    ② 发文章当时本机时钟读 `2026-09-27`，实际是 `09-30`（以 GitHub Actions 时间戳为准），
+    先写 09-27 后改名为 `2026-09-30-…` —— **改名会让旧 URL 变 404**，所以日期要在发布前定准。
+  - 站点是 GitHub Actions 上的 Jekyll，push 后约 40~60 秒构建完；`search.json` / `archive.html` /
+    首页全靠 `site.posts` 自动生成，**不需要手工维护索引**（首页帖子链接是相对路径 `/2026/09/30/…/`）。
+
+### 仓库化时又抓到两个「从源码构建」的坑
+
+7. **仓库里的 `rime-sandbox\` 是过时副本**：缺 `lua\vmenu_core.lua`（整个 v 菜单）、
+   `lua\predict_filter.lua`、`lua\phrase_first.lua`，opencc 也不全 —— 全新 clone
+   构建出来的包会少功能。已改为从真实 Rime 用户目录重新快照（41 个 lua / 3 个 opencc 全齐），
+   排除 `build\`、`*.userdb`（WeaselServer 占用 + 运行时产物）、日志、安装标记，
+   并把剪贴板历史清空后入库（隐私）。
+8. **`build-release.ps1` 的 `-LlamaSrc` 没有回退**：默认值指向开发者本机路径
+   `D:\王修翊\llama.cpp`，找不到就直接 `throw` —— 全新 clone 的机器必然构建失败。
+   已补上退回仓库内 `llama.cpp\` 的逻辑（与 `RimeSrc` 一致）。
+
+> 踩坑提醒：`robocopy` 的 `/XD` **不接受带通配符的全路径**
+> （`D:\rime-sandbox\*.userdb` 会报 `Invalid Parameter #13`），要用纯目录名；
+> 另外 `/XF '*.userdb'` 对**目录**无效（`rime_ice.userdb` 是目录），必须走 `/XD`。
+> 还有：`git add -A 2>&1 | Select-Object -First N` 会因为管道提前关闭而让 git 中断，
+> 结果**一个文件都没暂存**；中文路径在 `git diff --cached` 里默认是八进制转义，
+> 要加 `-c core.quotepath=false` 才能和文件名比对。`git init` 这台机器默认分支是
+> `master`，推 `main` 前记得 `git branch -M main`。
+
+### 维护入口
+
+- 重新整理并推送仓库：`powershell -File packaging\stage-suite-repo.ps1`，
+  然后到 `repo\weasel-vmenu-suite\` 里 `git add -A && git commit && git push`。
+  ⚠️ 该脚本是「全量重刷」`packaging\` 与根目录文件；**改完工作区文件记得重跑它**，
+  否则会出现「工作区已修、仓库里还是旧版」的假提交（本次就发生过一次：
+  commit message 写了 llama.cpp 回退，但仓库副本没同步）。
+- Release 正文：`packaging\RELEASE-NOTES-1.0.0.md`。
