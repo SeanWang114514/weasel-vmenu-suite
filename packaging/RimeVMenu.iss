@@ -13,8 +13,22 @@
 
 #define MyAppName "Rime VMenu 全家桶"
 #define MyAppNameShort "RimeVMenu"
-#define MyAppVersion "1.0.1"
-#define MyStageDir "..\stage\RimeVMenu-1.0.1"
+; 下面两个 define 用 #ifndef 包住，是为了让构建脚本能用 ISCC 的 /D 覆盖出 GPU 版：
+;   powershell -File packaging\build-release.ps1 -Gpu
+;     -> /DMyAppVersion=1.1.0-GPU /DMyStageDir=..\stage\RimeVMenu-1.1.0-GPU
+; 不加 #ifndef 的话，这里的 #define 会**永远压过**命令行 /D，GPU 版会静默编成
+; CPU 版的文件名和 stage 目录（内容却是 GPU 的），非常难查。
+; 另外 /D 的值不能带引号（带了 Inno 会把引号当值的一部分，OutputBaseFilename 非法）。
+; 下面两行就是无参数构建（CPU 版）时的默认值。
+#ifndef MyVerNum
+  #define MyVerNum "1.1.0"
+#endif
+#ifndef MyAppVersion
+  #define MyAppVersion "1.1.0"
+#endif
+#ifndef MyStageDir
+  #define MyStageDir "..\stage\RimeVMenu-1.1.0"
+#endif
 
 [Setup]
 AppId={{7C4E1B52-9A6F-4D2E-8C31-5B0A9E7D2F41}
@@ -22,7 +36,7 @@ AppName={#MyAppName}
 AppVersion={#MyAppVersion}
 AppPublisher=SeanWang114514
 AppPublisherURL=https://github.com/SeanWang114514/weasel-vmenu-suite
-VersionInfoVersion={#MyAppVersion}
+VersionInfoVersion={#MyVerNum}
 DefaultDirName={userappdata}\Rime
 ; ★ 必须关掉「沿用上次安装目录」：Inno 默认 UsePreviousAppDir=yes，会把上一次安装
 ; 写进 HKCU\...\Uninstall\{AppId}_is1\InstallLocation 的目录当成新默认值，

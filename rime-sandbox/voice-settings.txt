@@ -2,3 +2,4 @@
 punct_to_space=true
 hotkey=ctrl+win
 asr_threads=4
+asr_device=auto

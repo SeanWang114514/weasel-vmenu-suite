@@ -21,6 +21,7 @@
 | 前后鼻音模糊输入 | an/ang、en/eng、in/ing、ian/iang、uan/uang 五对可单独开关 |
 | 语音输入 | 按住 `Ctrl+Win` 说话、松开上屏（Qwen3-ASR 本地推理，含流式输出） |
 | 语音 CPU 占用 | 识别线程数可在设置窗口调（默认 4，整机占用约 26%），识别率不变 |
+| **GPU 加速（可选）** | 装 **GPU 版**包后自动用 N 卡推理：约 2.3 倍速、CPU 占用 ~11%；没 N 卡自动回落 CPU |
 | 候选框增强 | 一行 9 个、按 `↓` 展开 4×9 方格、长英文自动截断 |
 | 托盘入口 | 右键托盘图标 →「输入法设置 (S)」 |
 
@@ -32,11 +33,20 @@
 git clone https://github.com/SeanWang114514/weasel-vmenu-suite.git
 cd weasel-vmenu-suite
 下载Qwen模型.bat                                 :: 拉两个 gguf（~971MB，不进 git）
-powershell -ExecutionPolicy Bypass -File packaging\build-release.ps1
+powershell -ExecutionPolicy Bypass -File packaging\build-release.ps1          :: CPU 版
+powershell -ExecutionPolicy Bypass -File packaging\build-release.ps1 -Gpu     :: GPU 版（+CUDA）
 ```
 
-产物在 `out\`：`RimeVMenu-1.0.1.zip`（rime-install 兼容）+ `RimeVMenu-Setup-1.0.1.exe`。
+产物在 `out\`：`RimeVMenu-1.1.0.zip` / `RimeVMenu-Setup-1.1.0.exe`（CPU 版），
+`-Gpu` 则产出 `RimeVMenu-1.1.0-GPU.zip` / `RimeVMenu-Setup-1.1.0-GPU.exe`（约 1.75 GB）。
+两个包文件名不同、可共存，互不覆盖。
+
 构建脚本支持 `-NoModels`（跳过 971MB 模型，冒烟用）、`-SkipZip`、`-SkipExe`。
+
+> GPU 版要求 `llama.cpp\` 里有 CUDA 后端（`ggml-cuda.dll` + `cublas64_13.dll` +
+> `cublasLt64_13.dll` + `cudart64_13.dll`），且**与 `llama-server.exe` 同一个 commit 编出来的**。
+> 没有的话用 `-CudaSrc <目录>` 单独指定 CUDA 运行时来源。
+> 构建脚本会双向断言：GPU 版缺 CUDA dll 直接报错，CPU 版混进 CUDA dll 也直接报错。
 
 > [!IMPORTANT]
 > 构建脚本会读取**当前机器的 Rime 用户目录**（注册表 `RimeUserDir`，缺省
@@ -65,8 +75,10 @@ rime-sandbox\         一份可直接用于构建的 Rime 配置快照
   全新安装请用 exe 或 zip。另外它的 zip 路径**不能带空格、不能加引号**。
 - 语音模型（`*.gguf`）不进仓库（超 GitHub 100MB 单文件限制），
   Release 附件里已经带上了；从源码装请先跑 `下载Qwen模型.bat`。
-- 想让语音更快（NVIDIA 显卡）：把 llama.cpp 官方 CUDA 构建的 `llama-server.exe`
-  和相关 dll 覆盖进安装目录的 `llama.cpp\` 即可。
+- 想让语音更快（NVIDIA 显卡）：**直接下载 GPU 版包**（`*-GPU.exe` / `*-GPU.zip`），
+  装好即自动启用，无需手动替换任何文件。也可以自己把 llama.cpp 官方 CUDA 构建的
+  `llama-server.exe` 和相关 dll 覆盖进安装目录的 `llama.cpp\`，效果一样
+  （注意 dll 必须与 `llama-server.exe` 是同一个 commit，混版本会让后端加载失败）。
 
 ## 第三方组件与许可
 

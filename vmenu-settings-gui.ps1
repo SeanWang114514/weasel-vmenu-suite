@@ -771,17 +771,59 @@ function Load-VoiceSettings {
       $n = [int]$Matches[1]
       if ($n -ge 1 -and $n -le $script:cpuPhysCores) { $script:asrThreads = $n }
     }
+    if ($line -match '^\s*asr_device\s*=\s*(\S+)') {
+      $v = $Matches[1].ToLower()
+      if ($v -in @('auto', 'cpu', 'gpu')) { $script:asrDevice = $v }
+    }
   }
 }
 
 function Save-VoiceSettings {
   $v = if ($script:punctSpace) { 'true' } else { 'false' }
-  $txt = "# 语音输入设置（voice-overlay.py 读取）`npunct_to_space=$v`nhotkey=$($script:hotkey)`nasr_threads=$($script:asrThreads)`n"
+  $txt = "# 语音输入设置（voice-overlay.py 读取）`npunct_to_space=$v`nhotkey=$($script:hotkey)`nasr_threads=$($script:asrThreads)`nasr_device=$($script:asrDevice)`n"
   if ($script:hotkeyRecPid -gt 0) {
     # 录制中：让悬浮球暂停热键检测（它会查这个 pid 是否还活着）
     $txt += "hotkey_recorder_pid=$($script:hotkeyRecPid)`n"
   }
   Write-TextFile -Path $VOICE_SET_PATH -Text $txt
+}
+
+# 探测本机能不能真的用 GPU（N 卡 + 驱动 + llama.cpp 目录里 CUDA 运行时齐全）。
+# 三重检查缺一不可：只有显卡名不够——CPU 版包里没有 CUDA dll，起来就是失败。
+function Get-AsrGpuInfo {
+  $info = [ordered]@{
+    Name = ''; HasNvidia = $false; CudaDlls = $false; Usable = $false; VramMB = 0
+  }
+  try {
+    $gpu = Get-CimInstance Win32_VideoController -EA Stop |
+      Where-Object { $_.Name -match 'NVIDIA' } | Select-Object -First 1
+    if ($gpu) {
+      $info.HasNvidia = $true
+      $info.Name = $gpu.Name
+    }
+  } catch { }
+  if ($info.HasNvidia) {
+    $nvcuda = Join-Path $env:WINDIR 'System32\nvcuda.dll'
+    $llama = Join-Path $RimeDir 'llama.cpp'
+    $need = @('ggml-cuda.dll', 'cublas64_13.dll', 'cublasLt64_13.dll', 'cudart64_13.dll')
+    $info.CudaDlls = (Test-Path $nvcuda) -and (@($need | Where-Object {
+      Test-Path (Join-Path $llama $_) }).Count -eq $need.Count)
+    $info.Usable = $info.CudaDlls
+    # 显存：nvidia-smi 最准；拿不到就退回 WMI 的 AdapterRAM（32 位，>4GB 会失真）
+    try {
+      $mb = & nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits 2>$null |
+        Select-Object -First 1
+      if ($mb -and $mb -match '^\s*(\d+)\s*$') { $info.VramMB = [int]$Matches[1] }
+    } catch { }
+    if ($info.VramMB -le 0) {
+      try {
+        $gpu2 = Get-CimInstance Win32_VideoController |
+          Where-Object { $_.Name -match 'NVIDIA' } | Select-Object -First 1
+        if ($gpu2.AdapterRAM -gt 0) { $info.VramMB = [int]($gpu2.AdapterRAM / 1MB) }
+      } catch { }
+    }
+  }
+  return $info
 }
 
 # 把「线程数」翻译成人话占用档位（实测数据来自本机 i7-13620H / 16 逻辑核）：
@@ -799,6 +841,51 @@ function Update-CpuControls {
   $speed = if ($n -le 2) { '识别最快' } elseif ($n -le 4) { '识别很快' } elseif ($n -le 6) { '识别较快' } else { '速度提升有限' }
   $lblCpuCur.Text = "当前：$n 线程 —— 整机 CPU $est，$speed"
   $lblCpuCur.ForeColor = if ($n -le 4) { $C_GREEN } elseif ($n -le 6) { $C_ACCENT } else { $C_DANGER }
+  # GPU 模式下 CPU 只做前后处理，线程滑块基本无意义 -> 置灰提示
+  $isGpu = ($script:asrDevice -eq 'gpu') -or
+           (($script:asrDevice -eq 'auto') -and $script:gpuInfo.Usable)
+  $trkCpu.Enabled = -not $isGpu
+  $lblCpuCur.Text += if ($isGpu) { '（当前用 GPU，线程数不生效）' } else { '' }
+}
+
+# 设备卡片：把探测结果翻译成人话，并把不可用原因讲清楚（否则用户只会看到
+# 「选了 GPU 却没变快」，无从判断是没显卡、没驱动、还是装的是 CPU 版包）。
+function Update-DeviceControls {
+  if (-not $cboDevice) { return }
+  $g = $script:gpuInfo
+  $sel = [string]$cboDevice.SelectedItem
+  $script:asrDevice = switch -Wildcard ($sel) {
+    '自动*' { 'auto' }
+    'CPU*'  { 'cpu' }
+    'GPU*'  { 'gpu' }
+    default { 'auto' }
+  }
+  $eff = if ($script:asrDevice -eq 'cpu') { 'cpu' }
+         elseif ($g.Usable) { 'gpu' }
+         else { 'cpu' }
+  $gpuLabel = if ($g.Name) { $g.Name } else { '未检测到 NVIDIA 显卡' }
+  $vram = if ($g.VramMB -gt 0) { "，显存 $([math]::Round($g.VramMB / 1024.0, 1)) GB" } else { '' }
+  $lblDevCur.Text = "显卡：$gpuLabel$vram"
+  if ($eff -eq 'gpu') {
+    $lblDevState.Text = "当前生效：GPU 加速（识别约快 2.3 倍，CPU 占用约 11%）"
+    $lblDevState.ForeColor = $C_GREEN
+  } else {
+    $why = if (-not $g.HasNvidia) { '未检测到 NVIDIA 显卡' }
+           elseif (-not $g.CudaDlls) { '缺少 CUDA 运行时（当前装的是 CPU 版包）' }
+           else { '已手动选择 CPU' }
+    $lblDevState.Text = "当前生效：CPU（$why）"
+    $lblDevState.ForeColor = if ($script:asrDevice -eq 'cpu') { $C_TERT } else { $C_ACCENT }
+  }
+  if ($g.HasNvidia -and -not $g.CudaDlls) {
+    $lblDevHint.Text = "检测到 N 卡（$($g.Name)），但当前是 CPU 版安装包，未附带 CUDA 运行时。`n" +
+      "想用 GPU 加速请改装仓库 Release 里的 **GPU 版**安装包（约 1.75 GB），装好后这里会自动变成 GPU。`n" +
+      "CPU 版 / GPU 版功能完全一致，只有识别速度和 CPU 占用不同。"
+  } else {
+    $lblDevHint.Text = "GPU 加速需要 NVIDIA 显卡 + 驱动 + 安装包自带 CUDA 运行时，三者齐全才生效。`n" +
+      "「自动」：能用 GPU 就用，用不了静默回落 CPU —— 推荐保持默认，不用管。`n" +
+      "实测（RTX 5060 Laptop / 同一段 6.2 秒语音）：GPU 0.19 秒、CPU 占用 11%；CPU 0.43 秒、占用 26%。`n" +
+      "改动即时保存，**重新打开一次语音输入（重启悬浮球）后生效**。"
+  }
 }
 
 # --- 快捷键（hotkey=ctrl+win 之类，voice-overlay.py 每 0.4s 看一次 mtime 热更新）---
@@ -820,6 +907,13 @@ try {
   try { $script:cpuPhysCores = [int][Environment]::ProcessorCount } catch { }
 }
 $script:asrThreads = $ASR_THREADS_DEFAULT
+# --- 识别设备（CPU / GPU）---
+# auto 是默认：能用 GPU 就用，用不了静默回落 CPU，用户完全不用管。
+# 实测 RTX 5060 Laptop：GPU 0.19s / CPU 占用 11%，CPU 0.43s / 占用 26%。
+$ASR_DEVICE_DEFAULT = 'auto'
+$script:asrDevice = $ASR_DEVICE_DEFAULT
+$script:gpuInfo = [ordered]@{ Name = ''; HasNvidia = $false; CudaDlls = $false
+                              Usable = $false; VramMB = 0 }
 $script:hotkey = $HOTKEY_DEFAULT
 $script:hotkeyRecPid = 0
 $script:hotState = ''                  # '' | lead | up | press | collect
@@ -1037,6 +1131,20 @@ function Update-VoiceControls {
   $lblPunctState.Text = "当前：$(if ($script:punctSpace) { '标点 → 空格' } else { '保留标点' })"
   if ($script:punctSpace) { $lblPunctState.ForeColor = $C_GREEN } else { $lblPunctState.ForeColor = $C_TERT }
   try { $script:voiceLoading = $true; $trkCpu.Value = [int]$script:asrThreads } finally { $script:voiceLoading = $false }
+  # 设备卡片：探测 GPU（只在重新显示设置窗口时探一次，避免频繁调 WMI/nvidia-smi）
+  if ($cboDevice) {
+    $script:gpuInfo = Get-AsrGpuInfo
+    try {
+      $script:voiceLoading = $true
+      $idx = switch ($script:asrDevice) {
+        'cpu'   { 1 }
+        'gpu'   { 2 }
+        default { 0 }
+      }
+      $cboDevice.SelectedIndex = $idx
+    } finally { $script:voiceLoading = $false }
+    Update-DeviceControls
+  }
   Update-CpuControls
   if ($null -eq $btnHotkey) { return }
   if ($script:hotState) { return }      # 正在录制，别把进行中的提示刷掉
@@ -1712,6 +1820,38 @@ $chkPunct.Add_CheckedChanged({
   $lblPunctState.Text = "当前：$(if ($script:punctSpace) { '标点 → 空格' } else { '保留标点' })"
   if ($script:punctSpace) { $lblPunctState.ForeColor = $C_GREEN } else { $lblPunctState.ForeColor = $C_TERT }
   $statusLabel.Text = "语音设置已保存：$(if ($script:punctSpace) { '标点转空格（下一次识别生效）' } else { '保留标点（下一次识别生效）' })"
+})
+
+# ===== 语音识别设备卡片（CPU / GPU）=====
+# GPU 走 llama.cpp 的 CUDA 后端。实测本机 RTX 5060 Laptop：
+#    GPU -> 0.19s / 整机 CPU 11%      CPU -> 0.43s / 整机 CPU 26%
+# 识别结果逐字一致（同一份权重，只是算力位置不同）。
+# 默认 auto：探测到可用 GPU 就自动用，否则静默回落 CPU。
+$cardDevice = New-AppleCard -Title '语音识别设备（GPU 加速）'
+
+$lblDevCur = New-Object Windows.Forms.Label
+$lblDevCur.ForeColor = $C_TEXT
+$lblDevCur.AutoSize = $true
+
+$lblDevState = New-Object Windows.Forms.Label
+$lblDevState.ForeColor = $C_GREEN
+$lblDevState.AutoSize = $true
+
+$lblDevHint = New-Object Windows.Forms.Label
+$lblDevHint.ForeColor = $C_SUB
+$lblDevHint.Font = $FONT_HINT
+$lblDevHint.Text = ''
+
+$fldDevice = New-AppleField -X 0 -Y 0 -W 260 -H 30 -Combo
+$cboDevice = $fldDevice.Tag
+$cboDevice.Items.AddRange(@('自动（推荐）', '仅 CPU', '强制 GPU')) | Out-Null
+
+$cboDevice.Add_SelectedIndexChanged({
+  if ($script:voiceLoading) { return }
+  Update-DeviceControls
+  Update-CpuControls
+  Save-VoiceSettings
+  $statusLabel.Text = "识别设备已保存：$($cboDevice.SelectedItem)（重启悬浮球后生效）"
 })
 
 # ===== 语音识别 CPU 占用卡片 =====
@@ -2426,13 +2566,19 @@ function Layout-Tabs {
   $chkPunct.Location = New-Object Drawing.Point(18, 34)
   $lblPunctState.SetBounds(($cwv - 320), 36, 300, 20)
   $lblPunctHint.SetBounds(18, 68, ($cwv - 36), 92)
+  # 设备卡片：下拉一行 + 显卡一行 + 生效状态一行 + 说明四行
+  $cardDevice.SetBounds(16, 196, $cwv, 208)
+  $fldDevice.SetBounds(18, 34, 260, 30)
+  $lblDevCur.SetBounds(292, 40, ($cwv - 310), 22)
+  $lblDevState.SetBounds(18, 74, ($cwv - 36), 22)
+  $lblDevHint.SetBounds(18, 102, ($cwv - 36), 96)
   # CPU 占用卡片：滑块一行 + 状态一行 + 说明四行
-  $cardCpu.SetBounds(16, 196, $cwv, 176)
+  $cardCpu.SetBounds(16, 416, $cwv, 176)
   $trkCpu.SetBounds(16, 34, ($cwv - 32), 34)
   $lblCpuCur.SetBounds(18, 72, ($cwv - 36), 22)
   $lblCpuHint.SetBounds(18, 96, ($cwv - 36), 74)
   # 快捷键卡片：按钮一行 + 状态一行 + 说明三行
-  $cardHotkey.SetBounds(16, 382, $cwv, 196)
+  $cardHotkey.SetBounds(16, 602, $cwv, 196)
   $lblHotCur.SetBounds(18, 42, 130, 24)
   $btnHotkey.SetBounds(150, 32, 330, 40)
   $btnHotReset.SetBounds(494, 35, 140, 34)
@@ -2483,6 +2629,8 @@ $tabSet.Controls.AddRange(@($cardFuzzy, $cardPage, $cardClear, $cardFiles, $card
 
 $cardPunct.Controls.AddRange(@($chkPunct, $lblPunctState, $lblPunctHint))
 $tabVoice.Controls.Add($cardPunct)
+$cardDevice.Controls.AddRange(@($fldDevice, $lblDevCur, $lblDevState, $lblDevHint))
+$tabVoice.Controls.Add($cardDevice)
 $cardCpu.Controls.AddRange(@($trkCpu, $lblCpuCur, $lblCpuHint))
 $tabVoice.Controls.Add($cardCpu)
 $cardHotkey.Controls.AddRange(@($lblHotCur, $btnHotkey, $btnHotReset, $lblHotState, $lblHotHint))
