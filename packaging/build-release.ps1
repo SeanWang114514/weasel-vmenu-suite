@@ -1,4 +1,4 @@
-# build-release.ps1 —— 组装发布树 -> 打 zip（rime-install 兼容）-> 编译 exe 直装包
+﻿# build-release.ps1 —— 组装发布树 -> 打 zip（rime-install 兼容）-> 编译 exe 直装包
 #
 # 用法（在仓库任意位置）：
 #   powershell -File packaging\build-release.ps1                 # 完整构建（含模型）
@@ -18,7 +18,7 @@
 #   4) Qwen3-ASR 两个模型（-NoModels 跳过）
 #   5) 小狼毫安装器 + README-必读.md
 param(
-  [string]$Version = '1.0.0',
+  [string]$Version = '1.0.1',
   [string]$RimeSrc = 'D:\rime-sandbox',
   [string]$LlamaSrc = 'D:\王修翊\llama.cpp',
   [switch]$NoModels,
