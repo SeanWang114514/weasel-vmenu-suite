@@ -1,4 +1,4 @@
-﻿// Data.cs —— 全部文件读写 + 设置状态 + 输入法配置写入
+// Data.cs —— 全部文件读写 + 设置状态 + 输入法配置写入
 //
 // 与原 PowerShell 版（vmenu-settings-gui.ps1）逐字段对应；所有写出文件都是
 // UTF-8 无 BOM（带 BOM 会让剪贴板首条内容多出不可见字符）。
@@ -42,6 +42,7 @@ internal static class Data
     public static string FuzzySetPath;
     public static string CandSetPath;
     public static string SmartPunctSetPath;
+    public static string GridSetPath;
     public static string DefaultCustomPath;
     public static string BuildDefaultPath;
 
@@ -86,6 +87,7 @@ internal static class Data
         FuzzySetPath = Path.Combine(RimeDir, "fuzzy-settings.txt");
         CandSetPath = Path.Combine(RimeDir, "candidate-settings.txt");
         SmartPunctSetPath = Path.Combine(RimeDir, "smart-punct-settings.txt");
+        GridSetPath = Path.Combine(RimeDir, "grid-settings.txt");
         DefaultCustomPath = Path.Combine(RimeDir, "default.custom.yaml");
         BuildDefaultPath = Path.Combine(RimeDir, "build", "default.yaml");
     }
@@ -206,16 +208,99 @@ internal static class Data
             "misinput_interval=" + MiInterval + "\n");
     }
 
+    // ---- grid-settings.txt（候选栏每行数量）----
+    // 这个文件是**服务端**（WeaselServer 的 RimeWithWeasel.cpp）和 **lua**（vmenu_core.lua）
+    // 两边都读的：服务端按它算「一行几列 / 翻页时一屏放几个」，
+    // lua 按它算「给服务端发多少条候选」。两边必须读到同一个值，
+    // 否则会出现「发 9 条却按 6 列排版」这种错位。
+    //
+    // 为什么单独一个文件、而不并进 vmenu-settings.txt：
+    //   服务端读配置走的是极简的 key=value 扫描（不引 yaml 解析），
+    //   单独一个文件能让它的解析逻辑保持最小、也避免和 lua 侧的写入互相踩。
+    //
+    // 格式：LF 换行、UTF-8 无 BOM（服务端按字节比对 key，带 BOM 会让第一个 key 读不到）。
+    public const int GridColsMin = 1;
+    public const int GridColsMax = 12;
+    public const int GridColsCollapsedDefault = 9;
+    public const int GridColsExpandedDefault = 6;
+
+    public static int GridColsCollapsed = GridColsCollapsedDefault;  // 未展开时每行数量
+    public static int GridColsExpanded = GridColsExpandedDefault;    // 展开栏每行数量
+
+    public static void LoadGridSettings()
+    {
+        GridColsCollapsed = GridColsCollapsedDefault;
+        GridColsExpanded = GridColsExpandedDefault;
+        foreach (string line in ReadAllLines(GridSetPath))
+        {
+            Match m = Regex.Match(line, @"^\s*cols_collapsed\s*=\s*(\d+)");
+            if (m.Success)
+            {
+                int n;
+                if (int.TryParse(m.Groups[1].Value, out n) && n >= GridColsMin && n <= GridColsMax)
+                    GridColsCollapsed = n;
+            }
+            m = Regex.Match(line, @"^\s*cols_expanded\s*=\s*(\d+)");
+            if (m.Success)
+            {
+                int n;
+                if (int.TryParse(m.Groups[1].Value, out n) && n >= GridColsMin && n <= GridColsMax)
+                    GridColsExpanded = n;
+            }
+        }
+    }
+
+    public static void SaveGridSettings()
+    {
+        // 自己拼字符串而不用 WriteTextFile 之外的方式：WriteTextFile 已经是
+        // 「UTF-8 无 BOM + 覆盖写」，正是服务端期望的格式。
+        WriteTextFile(GridSetPath,
+            "# 候选栏每行数量（服务端 RimeWithWeasel.cpp 与 lua vmenu_core.lua 共读）\n" +
+            "# cols_collapsed = 未展开（单行）时每行几个候选\n" +
+            "# cols_expanded  = 展开栏每行几个候选\n" +
+            "cols_collapsed=" + GridColsCollapsed + "\n" +
+            "cols_expanded=" + GridColsExpanded + "\n");
+    }
+
     // ---- voice-settings.txt（语音输入）----
     // hotkey / hotkey_recorder_pid 是并发会话的「按住说话」快捷键协议：
     // 录制期间写 hotkey_recorder_pid=<本进程 pid>，悬浮球查到进程活着就暂停检测。
     public static string Hotkey = HotkeyKit.Default;
     public static int HotkeyRecPid;
 
+    // ASR 线程数（CPU 占用闸门）与识别设备。voice-overlay.py / voice-input.py 读这两个字段。
+    // ★ 教训：SaveVoiceSettings() 是**整文件重写**。早先只写 punct_to_space/hotkey，
+    //   结果用户只要在设置窗口动一下标点开关，asr_threads 就被静默抹掉、
+    //   llama.cpp 退回默认线程数把 CPU 打满。新增字段必须同时补进 Save。
+    public static int AsrThreads = DefaultAsrThreads;
+    public static string AsrDevice = "auto";      // auto | cpu | gpu
+
+    public const int DefaultAsrThreads = 4;
+
+    /// <summary>物理核数（不是逻辑核）：llama.cpp 开线程超过物理核只会空转自旋，越开越慢。</summary>
+    public static int PhysCores()
+    {
+        try
+        {
+            int n = 0;
+            foreach (System.Management.ManagementObject mo in new System.Management.ManagementObjectSearcher(
+                         "SELECT NumberOfCores FROM Win32_Processor").Get())
+            {
+                n += Convert.ToInt32(mo["NumberOfCores"]);
+            }
+            if (n > 0) return n;
+        }
+        catch { }
+        int p = Environment.ProcessorCount;
+        return p > 0 ? Math.Max(1, p / 2) : 4;
+    }
+
     public static void LoadVoiceSettings()
     {
         PunctSpace = true;
         Hotkey = HotkeyKit.Default;
+        AsrThreads = DefaultAsrThreads;
+        AsrDevice = "auto";
         foreach (string line in ReadAllLines(VoiceSetPath))
         {
             Match m = Regex.Match(line, @"^\s*punct_to_space\s*=\s*(\S+)");
@@ -227,6 +312,20 @@ internal static class Data
                 List<string> toks = HotkeyKit.Split(m.Groups[1].Value);
                 if (HotkeyKit.Test(toks) == null) Hotkey = m.Groups[1].Value;
             }
+            m = Regex.Match(line, @"^\s*asr_threads\s*=\s*(\d+)");
+            if (m.Success)
+            {
+                // 只认 1..物理核数，越界退回默认（写 0/999 会把机器打死）
+                int n;
+                if (int.TryParse(m.Groups[1].Value, out n) && n >= 1 && n <= PhysCores())
+                    AsrThreads = n;
+            }
+            m = Regex.Match(line, @"^\s*asr_device\s*=\s*(\S+)");
+            if (m.Success)
+            {
+                string v = m.Groups[1].Value.Trim().ToLowerInvariant();
+                if (v == "auto" || v == "cpu" || v == "gpu") AsrDevice = v;
+            }
         }
         HotkeyRecPid = 0;   // 启动时上一轮录制必然已经死了，pid 不认旧值
     }
@@ -235,7 +334,9 @@ internal static class Data
     {
         string txt = "# 语音输入设置（voice-overlay.py 读取）\n" +
             "punct_to_space=" + (PunctSpace ? "true" : "false") + "\n" +
-            "hotkey=" + Hotkey + "\n";
+            "hotkey=" + Hotkey + "\n" +
+            "asr_threads=" + AsrThreads + "\n" +
+            "asr_device=" + AsrDevice + "\n";
         if (HotkeyRecPid > 0)
         {
             // 录制中：让悬浮球暂停热键检测（它会查这个 pid 是否还活着）
