@@ -978,6 +978,11 @@ def send_backspaces(n):
 
     安全护栏：Ctrl/Win 还按着时绝不退格——Ctrl+Backspace 在多数编辑器里
     是“删一个词”，会删掉比我们输入的更多的内容。宁可放弃校正。
+
+    性能注记：SendInput 的成本是**每个按键事件约 5ms**（实测 126 个
+    退格 ~0.6s、200 个 ~1.1s），与调用次数无关（分批发不会更快，
+    合成一次调用也不会更快）。所以这里只做一次调用，真正的优化是
+    **少退格**——见 reconcile_plan 的公共前缀裁剪。
     """
     if n <= 0:
         return True
@@ -1072,11 +1077,20 @@ def reconcile_plan(text, emitted):
 
     - `none`     没流式过 -> 原样整段发送
     - `keep`     前缀一致 -> 只补尾巴（零退格，最常见）
-    - `rewrite`  模型改写了已上屏部分 -> 调用方先退格 len(emitted) 再发 text
+    - `trim`     前缀一致但后面被改写 -> 只删改掉的那截尾巴，再补新尾巴
+    - `rewrite`  从头就不一致 -> 调用方先退格 len(emitted) 再发 text
     - `keep_all` 最终为空但流式有字 -> 保留已上屏，一个字都不删
 
-    安全性依据：退格数必须**恰好** len(emitted) —— 每一步流入的字都记在
-    emitted 里，多退一格会吃掉用户原有文字，少退则留下错位垃圾。
+    `trim` 为什么重要：SendInput 的成本是**每个按键约 5ms**，退格数直接
+    等于「删除预览 → 插入正文」那段卡顿的时长。旧逻辑只要有一处不一致就
+    整段重打（2n 个事件），长句子会明显卡；改成公共前缀裁剪后，只需删掉
+    **真正变了的那几个字**，删除耗时不再随整句长度增长——这正是
+    「删除时间不随长度变化」的落点。事件数 (n-p)+(m-p) 恒 <= n+m，
+    所以 trim 永远不比重写慢，且结果完全等价。
+
+    安全性依据：退格数必须**恰好**等于「已上屏里要抹掉的那一截」——
+    每一步流入的字都记在 emitted 里，多退一格会吃掉用户原有文字，
+    少退则留下错位垃圾。
     """
     if not emitted:
         return ("none", text)
@@ -1084,7 +1098,16 @@ def reconcile_plan(text, emitted):
         return ("keep_all", "")
     if text.startswith(emitted):
         return ("keep", text[len(emitted):])
-    return ("rewrite", text)
+    # 公共前缀 p：前面这 p 个字文档里已经有了，一个字都不用动
+    p = 0
+    for a, b in zip(emitted, text):
+        if a != b:
+            break
+        p += 1
+    trim = len(emitted) - p
+    if trim <= 0:                        # 理论上到不了（已被 startswith 拦下）
+        return ("rewrite", text)
+    return ("trim", (trim, text[p:]))
 
 
 def get_foreground_hwnd():
@@ -2079,7 +2102,9 @@ class Overlay:
         """最终结果与流式已上屏文字对账，返回本轮还需要补发的文本。
 
         - 前缀一致 -> 只补尾巴（常见情况，零退格）；
-        - 模型回头改写 -> 退格删掉已上屏的，再发完整最终结果；
+        - 前缀一致但尾巴被改写 -> 只删那截改掉的尾巴（trim，退格数=真正变了
+          的字数，不随整句长度增长）；
+        - 从头就不一致 -> 退格删掉已上屏的，再发完整最终结果；
         - 最终为空但流式有字 -> 保留已上屏的（宁可留字不瞎删）。
 
         决策本身是纯函数 `reconcile_plan`（selftest 与回归测试共用同一份）。
@@ -2087,17 +2112,24 @@ class Overlay:
         with self._emit_lock:
             emitted = self.emitted
             self.emitted = ""
-        mode, tail = reconcile_plan(text, emitted)
+        mode, payload = reconcile_plan(text, emitted)
         if mode == "none":
-            return tail                  # 没流式过，原样整段发送
+            return payload               # 没流式过，原样整段发送
         if mode == "keep":
-            out("reconcile: keep %d, tail +%d" % (len(emitted), len(tail)))
-            return tail
+            out("reconcile: keep %d, tail +%d" % (len(emitted), len(payload)))
+            return payload
         if mode == "keep_all":
             return ""                    # 保留已上屏，一个字都不删
-        # rewrite：退格清掉已上屏的再发最终版（护栏：修饰键必须松开）
-        out("reconcile: rewrite (emitted=%d, final=%d)"
-            % (len(emitted), len(text)))
+
+        if mode == "trim":
+            trim, insert = payload
+            out("reconcile: trim (emitted=%d, final=%d, del=%d, ins=%d)"
+                % (len(emitted), len(text), trim, len(insert)))
+        else:
+            trim, insert = len(emitted), text
+            out("reconcile: rewrite (emitted=%d, final=%d)"
+                % (len(emitted), len(text)))
+
         if self.no_send:
             return text                  # simulate：什么都没真发过，不退格
         if not wait_modifiers_up():
@@ -2107,10 +2139,10 @@ class Overlay:
             # 焦点变了：宁可留下错位的流式文字，也绝不去别的窗口按退格
             out("reconcile retract skipped: focus changed (text left in place)")
             return ""
-        if not send_backspaces(len(emitted)):
+        if not send_backspaces(trim):
             out("reconcile retract failed: append nothing")
             return ""
-        return text
+        return insert
 
     def _recognize(self):
         text = None
@@ -2405,8 +2437,38 @@ def selftest():
     assert reconcile_plan("随便什么", "") == ("none", "随便什么")
     assert reconcile_plan("今天天气真好 我们去吧", "今天天气真好") \
         == ("keep", " 我们去吧")
-    assert reconcile_plan("今天天气真好", "今天天气不错") == ("rewrite", "今天天气真好")
+    assert reconcile_plan("今天天气真好", "今天天气不错") == ("trim", (2, "真好"))
     assert reconcile_plan("", "今天天气真好") == ("keep_all", "")
+
+    # 15c) 公共前缀裁剪：只删「真正变了」的那一截，退格数不随整句长度增长。
+    #      这是「删除耗时固定」的落点——退格数直接等于卡顿时长（每键 ~5ms）。
+    #      整段重打是 2n 个事件，trim 恒 <= 2n，永远不会更慢。
+    #      注意签名为 reconcile_plan(text=最终, emitted=已上屏)
+    assert reconcile_plan("今天天气真好啊", "今天天气真不错") == ("trim", (2, "好啊"))
+    # 尾巴变短：删多补少（删 2 补 0）
+    assert reconcile_plan("今天天气", "今天天气真好") == ("trim", (2, ""))
+    # 从头就不一致：退化成整段重打（退格数 = 已上屏全部）
+    assert reconcile_plan("你好世界", "今天天气真好") == ("trim", (6, "你好世界"))
+    # 已上屏是最终结果的前缀 -> 走 keep，零退格
+    assert reconcile_plan("今天天气真好我们去公园", "今天天气真好") == ("keep", "我们去公园")
+    for old, new in (("今天天气不错", "今天天气真好"),
+                     ("今天天气真不错", "今天天气真好啊"),
+                     ("我们明天去公园散步吧", "我们明天去公园跑步吧")):
+        mode, (trim, insert) = reconcile_plan(new, old)
+        assert mode == "trim", "%r -> %r 应为 trim，实为 %s" % (old, new, mode)
+        # 不变量：抹掉尾巴 trim 个 + 补上 insert，必须恰好还原成最终结果
+        assert old[:len(old) - trim] + insert == new, \
+            "trim 还原失败: %r %r -> %r" % (old, new, old[:len(old) - trim] + insert)
+        # 不变量：trim 的事件数 <= 整段重打的事件数
+        assert trim + len(insert) <= len(old) + len(new), "trim 比重写还多"
+    # 退格数不随整句长度增长：不管句子多长，只在结尾改 3 个字就只删 3 个
+    for n in (10, 40, 82, 126, 200):
+        old = "甲" * n
+        new = "甲" * (n - 3) + "乙丙丁"
+        _, (trim, insert) = reconcile_plan(new, old)
+        assert trim == 3, "n=%d 只该删 3 个字，实得 %d" % (n, trim)
+        assert trim + len(insert) == 6, \
+            "n=%d 事件数应为 6，实得 %d" % (n, trim + len(insert))
 
     # 15b) 端到端不变量：把「流式续发 + 最终对账」跑在一块虚拟屏幕上，
     #      跑完屏幕内容必须恰好等于最终结果，退格数必须恰好等于已注入字数
@@ -2421,17 +2483,23 @@ def selftest():
                 continue
             emitted += delta
             screen += delta
-        mode, tail = reconcile_plan(final, emitted)
+        mode, payload = reconcile_plan(final, emitted)
         if mode == "rewrite":
             backspaces = len(emitted)
             screen = screen[:-backspaces] if backspaces else screen
             screen += final
+        elif mode == "trim":
+            # trim：只抹掉「真正变了」的那截尾巴，再补新尾巴
+            backspaces, insert = payload
+            screen = screen[:-backspaces] if backspaces else screen
+            screen += insert
         elif mode != "keep_all":         # keep_all：刻意保留流式文字，不补不发
-            screen += tail
+            screen += payload
         assert screen == expect, \
             "%s: screen=%r != expect=%r" % (tag, screen, expect)
-        assert backspaces in (0, len(emitted)), \
-            "%s: backspaces=%d != emitted=%d" % (tag, backspaces, len(emitted))
+        assert 0 <= backspaces <= len(emitted), \
+            "%s: backspaces=%d out of range (emitted=%d)" % (
+                tag, backspaces, len(emitted))
         return backspaces, mode
 
     # 模型把「真好」改成「真的好啊」，尾巴继续上屏，松手退格重发 —— 屏幕归位
