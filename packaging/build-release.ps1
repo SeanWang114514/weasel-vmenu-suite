@@ -193,6 +193,24 @@ if ($NoModels) {
 }
 
 # ---------------------------------------------------------------- 5) 自检
+# ★ 回归断言：语音脚本必须是带 GPU 支持的版本。
+#   第 1 步是「整目录拷实时 Rime 用户目录」，而实时目录里的 voice-*.py 是**开发时手动
+#   同步过去的副本**。一旦忘了同步，包里就会装出「exe 有 GPU、.py 没有」的混合状态：
+#   启动器优先用 exe 所以平时看不出问题，但 语音输入.bat / 语音输入-悬浮球.bat 的
+#   python 回落分支会静默退回 CPU —— 实测漏过一次（.py 落后 master 155 行）。
+#   exe 是二进制没法从源码断言，所以这里只查 .py，并要求它认得 asr_device。
+foreach ($py in @('voice-overlay.py', 'voice-input.py')) {
+  $p = Join-Path $Stage $py
+  if (-not (Test-Path $p)) { throw "stage verification FAILED: missing $py" }
+  $src = Get-Content $p -Raw
+  foreach ($needle in @('asr_device', 'gpu_available', 'ngl')) {
+    if ($src -notmatch [regex]::Escape($needle)) {
+      throw ("$py 是旧版（不含 '$needle'），会装出「exe 支持 GPU、py 回落 CPU」的混合包。`n" +
+             "  修法：把工作区 master 的 $py 同步到 Rime 源目录（$RimeSrc）后重新构建。")
+    }
+  }
+}
+
 $must = @(
   'rime_ice.schema.yaml', 'rime_ice.custom.yaml', 'weasel.custom.yaml', 'default.custom.yaml',
   'predict-bigram.txt', 'custom_phrase.txt', 'fuzzy-settings.txt', 'candidate-settings.txt',

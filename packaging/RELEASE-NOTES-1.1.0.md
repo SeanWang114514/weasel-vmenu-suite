@@ -57,7 +57,7 @@ asr_device=auto
 `asr_device` 填 `auto` / `cpu` / `gpu`，非法值自动退回 `auto`；`asr_threads` 填 `0`、`999`、`abc` 也会退回默认 4。
 **改完重新打开一次语音输入（重启悬浮球）生效。**
 
-## 本版修的两个问题
+## 本版修的三个问题
 
 ### 1. 设置窗口会悄悄抹掉 CPU 优化配置（1.0.1 遗留 bug）
 
@@ -68,7 +68,17 @@ asr_device=auto
 现在两个字段都纳入读写，并且做了回归测试（读 → 改 → 写，断言字段仍在）。
 顺带修好了 1.0.1 里那张卡片**其实没出现在设置窗口**的问题：当时误加在了遗留的 PowerShell 版本上。
 
-### 2. CPU 版包里混进 CUDA 运行时
+### 2. 包里的 `voice-*.py` 是旧版（有 exe 在跑所以平时看不出）
+
+安装包同时带了两套语音程序：`.exe`（打包好的，启动器优先用）和 `.py`（源码，Python 环境下的回落分支用）。
+`.exe` 这次是重新编的、带 GPU 支持，但仓库根目录那两个 `.py` 副本漏了同步 ——
+结果是**同一份包里 exe 支持 GPU、py 只有 CPU**。启动器优先走 exe，所以日常使用看不出来；
+只有走 `语音输入.bat` / `语音输入-悬浮球.bat` 的 Python 回落分支时才会静默退回 CPU。
+
+现已同步，并在构建脚本里加了**断言**：打包前检查 `voice-overlay.py` / `voice-input.py`
+必须认得 `asr_device`，否则直接报错中止，不允许再装出这种混合包。
+
+### 3. CPU 版包里混进 CUDA 运行时
 
 构建时第 1 步会把实时 Rime 目录整个拷进发布树，开发机里如果残留着测试用的 CUDA dll，
 就会被一起打进去，让 CPU 版平白胖 600 多 MB。现在打包前会清空目标目录，
@@ -120,16 +130,16 @@ CPU 版 ↔ GPU 版之间互相切换也是直接覆盖装，配置和词库都�
 
 ```
 # CPU 版
-RimeVMenu-Setup-1.1.0.exe     1197535498 bytes
-  sha256  360778F39D56E991B8BB84B99381DB9891E688EB58BA38AE77AD41D332EBB314
-RimeVMenu-1.1.0.zip           1202275453 bytes
-  sha256  F7FB939237C3D10951063C30D45E3616422BDF73921590C760BF3FD43B5417B6
+RimeVMenu-Setup-1.1.0.exe     1197537817 bytes
+  sha256  A91642DCD3448BF79C78EC9DE2F853F53CEBF9330833B638F4532C9FE48000D1
+RimeVMenu-1.1.0.zip           1202278080 bytes
+  sha256  BFAEEC488C89B371320288D4EB998AA63D5C6C5751531FCCFAC12CEC6157C4E0
 
 # GPU 版
-RimeVMenu-Setup-1.1.0-GPU.exe 1694365492 bytes
-  sha256  3F991CC798DCC79BC0B9C2D6B890072B4D597626F05BEF1EA6FD4572468D8594
-RimeVMenu-1.1.0-GPU.zip       1724048729 bytes
-  sha256  BADCAD7426CE5E79884D84CECCE1319026A2EDE9A5B4B14DD755AB708C977DD6
+RimeVMenu-Setup-1.1.0-GPU.exe 1694367805 bytes
+  sha256  291E303E1E958F3B451699737C3DA28C5C70CFC991C7D5130919EE88BF5006CE
+RimeVMenu-1.1.0-GPU.zip       1724051356 bytes
+  sha256  47C6C310BEF9695FBC0B29452F81BAFB93DEEC356410B81CA1C4782B26B08E87
 ```
 
 ## 从源码构建
