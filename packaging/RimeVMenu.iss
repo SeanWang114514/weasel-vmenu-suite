@@ -1,4 +1,4 @@
-﻿; ============================================================================
+; ============================================================================
 ; RimeVMenu.iss - 小狼毫全家桶 exe 直装包（Inno Setup 6）
 ;
 ; 装什么：完整包（RIME 配置 + lua + 词库 + VMenu/VMenuSettings/语音 exe +
@@ -8,13 +8,13 @@
 ;
 ; 编译（build-release.ps1 调用）：
 ;   iscc.exe packaging\RimeVMenu.iss
-; 输入：..\stage\RimeVMenu-1.0.0\ （由 build-release.ps1 搭好）
+; 输入：..\stage\RimeVMenu-1.0.1\ （由 build-release.ps1 搭好）
 ; ============================================================================
 
 #define MyAppName "Rime VMenu 全家桶"
 #define MyAppNameShort "RimeVMenu"
-#define MyAppVersion "1.0.0"
-#define MyStageDir "..\stage\RimeVMenu-1.0.0"
+#define MyAppVersion "1.0.1"
+#define MyStageDir "..\stage\RimeVMenu-1.0.1"
 
 [Setup]
 AppId={{7C4E1B52-9A6F-4D2E-8C31-5B0A9E7D2F41}

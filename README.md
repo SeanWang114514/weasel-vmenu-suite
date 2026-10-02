@@ -5,8 +5,8 @@
 候选方格（4 行 × 9 列）……
 
 > **只想装来用 → 别 clone 仓库，去 [Releases](../../releases) 下载。**
-> `RimeVMenu-Setup-1.0.0.exe`（双击直装，含语音模型）或
-> `RimeVMenu-1.0.0.zip`（解压后双击 `安装.bat`）。
+> `RimeVMenu-Setup-1.0.1.exe`（双击直装，含语音模型）或
+> `RimeVMenu-1.0.1.zip`（解压后双击 `安装.bat`）。
 > 安装细节看 [`README-必读.md`](README-必读.md)，功能细节看 [`使用说明.md`](使用说明.md)。
 
 ## 功能一览
@@ -20,6 +20,7 @@
 | 下一个候选词预测 | 字级二元统计（`predict-bigram.txt`） |
 | 前后鼻音模糊输入 | an/ang、en/eng、in/ing、ian/iang、uan/uang 五对可单独开关 |
 | 语音输入 | 按住 `Ctrl+Win` 说话、松开上屏（Qwen3-ASR 本地推理，含流式输出） |
+| 语音 CPU 占用 | 识别线程数可在设置窗口调（默认 4，整机占用约 26%），识别率不变 |
 | 候选框增强 | 一行 9 个、按 `↓` 展开 4×9 方格、长英文自动截断 |
 | 托盘入口 | 右键托盘图标 →「输入法设置 (S)」 |
 
@@ -34,7 +35,7 @@ cd weasel-vmenu-suite
 powershell -ExecutionPolicy Bypass -File packaging\build-release.ps1
 ```
 
-产物在 `out\`：`RimeVMenu-1.0.0.zip`（rime-install 兼容）+ `RimeVMenu-Setup-1.0.0.exe`。
+产物在 `out\`：`RimeVMenu-1.0.1.zip`（rime-install 兼容）+ `RimeVMenu-Setup-1.0.1.exe`。
 构建脚本支持 `-NoModels`（跳过 971MB 模型，冒烟用）、`-SkipZip`、`-SkipExe`。
 
 > [!IMPORTANT]

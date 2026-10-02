@@ -131,6 +131,18 @@ ABORT_RETRACT_WAIT = 10.0                # abort 撤回时等修饰键松开的�
 # 放一起会被冲掉。
 VOICE_SET_PATH = os.path.join(RIME_DIR, "voice-settings.txt")
 
+# 物理核数（不是逻辑核数）：llama.cpp 开线程超过物理核只会空转自旋，
+# 白白烧 CPU 还更慢，所以线程数上限按物理核算。
+try:
+    PHYS_CORES = os.cpu_count() or 4
+    try:                                  # Windows 上 os.cpu_count() 含超线程
+        import psutil                     # 有 psutil 就取真实物理核
+        PHYS_CORES = psutil.cpu_count(logical=False) or PHYS_CORES
+    except Exception:
+        PHYS_CORES = max(1, PHYS_CORES // 2)   # 没有 psutil：按一半估
+except Exception:                         # pragma: no cover - 环境相关
+    PHYS_CORES = 4
+
 
 def punct_space_enabled():
     """读 punct_to_space 开关；文件缺失/字段缺失时默认开（本次需求的默认行为）。"""
@@ -143,6 +155,45 @@ def punct_space_enabled():
     except OSError:
         pass
     return True
+
+
+# ---- ASR 线程数（CPU 占用闸门）----
+# 教训：llama.cpp 默认 `-t -1` 会按**逻辑核数**开线程（本机 i7-13620H = 16），
+# 多核空转自旋同步，实测一次 3s 音频吃 946% 单核 ≈ 59% 整机、瞬时打满，
+# 用户侧就是「一说话任务管理器就爆红」。
+# 实测同机同音频（3s wav，整机 16 逻辑核口径）：
+#    默认16线程 -> 总CPU 1.40s / 59.1% 整机
+#     -t 6      -> 总CPU 0.82s / 36.3% 整机
+#     -t 4      -> 总CPU 0.64s / 24.4% 整机   <-- 默认值，压到 30% 以下
+#     -t 2      -> 总CPU 0.45s / 11.6% 整机（更省但尾延迟约 +0.1s）
+# 关键：限制线程**同时降低总 CPU 消耗**（1.40s -> 0.64s，省 54%），
+# 因为省掉了超订线程的空转自旋；墙钟只从 0.148s 增到 0.163s，体感无差别。
+# 识别率完全不受影响：同一个模型、同一份权重，只是并行度不同。
+ASR_THREADS_DEFAULT = 4
+
+
+def asr_threads():
+    """读 voice-settings.txt 的 asr_threads=；缺失/非法/越界一律退回默认。
+
+    要求：>=1 且 <= 物理核数，否则忽略（防止误写成 0 或 999 把机器打死）。
+    """
+    val = None
+    try:
+        with open(VOICE_SET_PATH, encoding="utf-8") as f:
+            for line in f:
+                if line.strip().startswith("asr_threads"):
+                    val = line.split("=", 1)[1].strip()
+                    break
+    except OSError:
+        pass
+    if val is not None:
+        try:
+            n = int(val)
+            if 1 <= n <= PHYS_CORES:
+                return n
+        except (TypeError, ValueError):
+            pass
+    return ASR_THREADS_DEFAULT
 
 
 def punct_to_space(text):
@@ -255,6 +306,7 @@ def asr_start(wait=ASR_BOOT_TIMEOUT):
              "--mmproj", ASR_MMPROJ,
              "--host", ASR_HOST, "--port", str(ASR_PORT),
              "--ctx-size", "4096", "-np", "1",
+             "-t", str(asr_threads()), "-tb", str(asr_threads()),
              "--no-webui", "--no-warmup"],
             cwd=LLAMA_DIR,
             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,

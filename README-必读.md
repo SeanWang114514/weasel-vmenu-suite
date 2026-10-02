@@ -26,7 +26,7 @@
 
 ## 方式 A：exe 直装（推荐）
 
-1. 下载 Release 里的 `RimeVMenu-Setup-1.0.0.exe`，双击运行；
+1. 下载 Release 里的 `RimeVMenu-Setup-1.0.1.exe`，双击运行；
 2. 安装目录**默认 = 你的 Rime 用户目录**（注册表 `RimeUserDir`，通常
    `%APPDATA%\Rime`），一般不用改；
 3. 点「安装」→ 结束后会自动执行收尾：注册开机自启、装托盘入口、
@@ -35,7 +35,7 @@
 
 ## 方式 B：zip 解压 + 一键安装（完整功能）
 
-1. 下载 Release 里的 `RimeVMenu-1.0.0.zip`，解压到**任意位置**（路径随意）；
+1. 下载 Release 里的 `RimeVMenu-1.0.1.zip`，解压到**任意位置**（路径随意）；
 2. 双击解压目录里的 **`安装.bat`**；
 3. 它会把整包复制进 Rime 用户目录，然后自动执行与 exe 相同的收尾步骤。
 
@@ -44,12 +44,12 @@
 小狼毫自带的包安装器支持直接吃 zip（顶层 `*.yaml` / `*.txt` / `opencc\*` 按官方规则导入）：
 
 ```bat
-"C:\Program Files\Rime\weasel-0.17.x\rime-install.bat" 全路径\RimeVMenu-1.0.0.zip
+"C:\Program Files\Rime\weasel-0.17.x\rime-install.bat" 全路径\RimeVMenu-1.0.1.zip
 ```
 
 > ⚠️ **zip 的路径里绝对不能有空格**（也别用引号把路径括起来）。`rime-install.bat`
 > 自己解析不了带空格/带引号的参数：实测会直接报
-> `... \RimeVMenu-1.0.0.zip"" was unexpected at this time`，或者被误判成包名去
+> `... \RimeVMenu-1.0.1.zip"" was unexpected at this time`，或者被误判成包名去
 > GitHub 下载。所以请先把 zip 挪到无空格的目录（例如 `C:\RimePkg\`）再导入；
 > 路径带空格时请改用方式 A 或 B。
 >
