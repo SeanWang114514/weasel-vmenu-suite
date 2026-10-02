@@ -1,32 +1,47 @@
 ﻿# build-release.ps1 —— 组装发布树 -> 打 zip（rime-install 兼容）-> 编译 exe 直装包
 #
 # 用法（在仓库任意位置）：
-#   powershell -File packaging\build-release.ps1                 # 完整构建（含模型）
-#   powershell -File packaging\build-release.ps1 -NoModels       # 跳过 971MB 模型拷贝（冒烟）
-#   powershell -File packaging\build-release.ps1 -SkipExe        # 只打 zip
-#   powershell -File packaging\build-release.ps1 -SkipZip        # 只编 exe
+#   powershell -File packaging\build-release.ps1                       # CPU 版（完整，含模型）
+#   powershell -File packaging\build-release.ps1 -Gpu                  # GPU 版（含 CUDA，+600MB）
+#   powershell -File packaging\build-release.ps1 -NoModels             # 跳过 971MB 模型拷贝（冒烟）
+#   powershell -File packaging\build-release.ps1 -SkipExe              # 只打 zip
+#   powershell -File packaging\build-release.ps1 -SkipZip              # 只编 exe
+#   powershell -File packaging\build-release.ps1 -NoModels -SkipZip -Gpu -CudaSrc <dir>
+#
+# 两个版本（CPU / GPU）：
+#   CPU 版：不带 CUDA 运行时，约 1.1 GB。任何机器都能装，语音走 CPU（整机 ~26%）。
+#   GPU 版：带 CUDA 运行时（cuBLAS 等，+600MB），约 1.75 GB。
+#           N 卡机器上自动用 GPU（~11% CPU、约 2.3 倍速），没 N 卡时自动回落 CPU。
+#   功能完全一致，只是识别速度和 CPU 占用不同 —— 见设置窗口「语音识别设备」卡片。
 #
 # 产物：
-#   out\RimeVMenu-<ver>.zip        zip 根目录 = RimeVMenu-<ver>\（rime-install.bat
-#                                  解包规则要求根文件夹名 = zip 主文件名）
-#   out\RimeVMenu-Setup-<ver>.exe  Inno Setup 直装包
+#   out\RimeVMenu-<ver>.zip             zip 根目录 = RimeVMenu-<ver>\（rime-install.bat
+#                                       解包规则要求根文件夹名 = zip 主文件名）
+#   out\RimeVMenu-Setup-<ver>.exe       Inno Setup 直装包
+#   GPU 版把 <ver> 换成 <ver>-GPU（文件名与 stage 目录名同步带 -GPU 后缀），
+#   这样两个包可以共存、Repack 时不会互相覆盖。
 #
-# 发布树 stage\RimeVMenu-<ver>\ 的组成：
+# 发布树 stage\RimeVMenu-<ver>[-GPU]\ 的组成：
 #   1) Rime 配置（来自实时 Rime 用户目录，剔除 build/ userdb/ 备份/日志，剪贴板缓存清空）
 #   2) 外挂 exe 与脚本（VMenu/Voice* 从 dist\ 优先取，其余来自仓库根）
-#   3) llama.cpp CPU 运行时（剔除 CUDA/RPC，保证无显卡也能跑）
+#   3) llama.cpp 运行时（CPU 版剔除 CUDA/RPC；GPU 版整组带上 CUDA）
 #   4) Qwen3-ASR 两个模型（-NoModels 跳过）
 #   5) 小狼毫安装器 + README-必读.md
 param(
-  [string]$Version = '1.0.1',
+  [string]$Version = '1.1.0',
   [string]$RimeSrc = 'D:\rime-sandbox',
   [string]$LlamaSrc = 'D:\王修翊\llama.cpp',
+  [string]$CudaSrc = '',
+  [switch]$Gpu,
   [switch]$NoModels,
   [switch]$SkipZip,
   [switch]$SkipExe
 )
 $ErrorActionPreference = 'Stop'
 $Root = Split-Path -Parent $PSScriptRoot          # packaging\.. = 仓库根
+# GPU 版：文件名/版本串带 -GPU 后缀，与 CPU 版并存不冲突
+$VerTag = if ($Gpu) { "$Version-GPU" } else { $Version }
+$CPU_VER = $Version
 
 # 允许在没有 D:\rime-sandbox 的机器上退回仓库内的 rime-sandbox\ 副本
 if (-not (Test-Path (Join-Path $RimeSrc 'rime_ice.schema.yaml'))) {
@@ -43,12 +58,13 @@ if (-not (Test-Path (Join-Path $LlamaSrc 'llama-server.exe'))) {
   else { throw "llama runtime source not found: $LlamaSrc (set -LlamaSrc, or put a CPU build in $altLlama)" }
 }
 
-$Name  = "RimeVMenu-$Version"
+$Name  = "RimeVMenu-$VerTag"
 $Stage = Join-Path $Root "stage\$Name"
 $Out   = Join-Path $Root 'out'
-Write-Host "== build-release: $Name =="
+Write-Host "== build-release: $Name ($(if ($Gpu) { 'GPU/CUDA' } else { 'CPU' })) =="
 Write-Host "Rime config source: $RimeSrc"
 Write-Host "Llama runtime source: $LlamaSrc"
+if ($Gpu -and $CudaSrc) { Write-Host "CUDA runtime source: $CudaSrc" }
 
 if (Test-Path (Join-Path $Root 'stage')) { Remove-Item (Join-Path $Root 'stage') -Recurse -Force }
 New-Item -ItemType Directory -Path $Stage, $Out -Force | Out-Null
@@ -103,14 +119,65 @@ if (-not (Test-Path (Join-Path $LlamaSrc 'llama-server.exe'))) {
   throw "llama runtime source not found: $LlamaSrc (set -LlamaSrc)"
 }
 $llamaDst = Join-Path $Stage 'llama.cpp'
+# ★ 关键：第 1 步会把实时 Rime 目录**整目录**拷过来，而开发机的 rime-sandbox\llama.cpp
+#   里可能残留着测试用的 CUDA dll（为了验证 GPU 路径临时拷进去的）。
+#   第 3 步只做 Copy-Item -Force、从不删除，于是那些 dll 会一路混进「CPU 版」包里
+#   —— 实测漏进 627MB，zip 从 1.1GB 涨到 1.6GB，而且普通用户白下。
+#   所以进第 3 步前先把目标目录整个清空，保证内容是第 3 步**唯一**决定的。
+if (Test-Path $llamaDst) { Remove-Item $llamaDst -Recurse -Force }
 New-Item -ItemType Directory -Path $llamaDst -Force | Out-Null
-Get-ChildItem $LlamaSrc -File | Where-Object {
-  ($_.Name -eq 'llama-server.exe' -or $_.Name -eq 'LICENSE-LLVM-OpenMP' -or $_.Extension -eq '.dll') -and
-  $_.Name -notmatch '^(cublas|cudart|ggml-cuda|ggml-rpc)'
-} | ForEach-Object { Copy-Item $_.FullName -Destination $llamaDst -Force }
+
+# GPU 版：带上 CUDA 后端（>600MB）。llama.cpp 的 CUDA 后端强依赖 cuBLAS，
+# 缺任何一个 dll 都不是「降级」而是**启动直接失败**，所以整组一起带。
+# CPU 版剔除这组 dll：无 N 卡的用户不必白下 600MB，语音走 CPU 一样能用。
+$cudaPattern = '^(cublas|cudart|ggml-cuda|ggml-rpc)'
+if ($Gpu) {
+  $cudaSrc = $LlamaSrc
+  if (-not (Test-Path (Join-Path $cudaSrc 'ggml-cuda.dll'))) {
+    # 允许显式指定 CUDA 运行时来源（例如本机另一个 CUDA 构建目录）
+    if ($CudaSrc -and (Test-Path (Join-Path $CudaSrc 'ggml-cuda.dll'))) {
+      $cudaSrc = $CudaSrc
+    } else {
+      throw ("GPU 版需要 CUDA 运行时，但 $LlamaSrc 里没有 ggml-cuda.dll。`n" +
+             "请用 -CudaSrc <目录> 指定一个含 cublas/cudart/ggml-cuda 的 llama.cpp 构建，`n" +
+             "或改装官方 CUDA 构建的 llama-server.exe + dll 到该目录。")
+    }
+  }
+  Get-ChildItem $LlamaSrc -File | Where-Object {
+    ($_.Name -eq 'llama-server.exe' -or $_.Name -eq 'LICENSE-LLVM-OpenMP' -or $_.Extension -eq '.dll')
+  } | ForEach-Object { Copy-Item $_.FullName -Destination $llamaDst -Force }
+  # CUDA dll 可能不在 $LlamaSrc（用 -CudaSrc 指定）：补齐缺失的那几个
+  if ($cudaSrc -ne $LlamaSrc) {
+    Get-ChildItem $cudaSrc -File | Where-Object {
+      $_.Extension -eq '.dll' -and $_.Name -match $cudaPattern
+    } | ForEach-Object { Copy-Item $_.FullName -Destination $llamaDst -Force }
+  }
+} else {
+  Get-ChildItem $LlamaSrc -File | Where-Object {
+    ($_.Name -eq 'llama-server.exe' -or $_.Name -eq 'LICENSE-LLVM-OpenMP' -or $_.Extension -eq '.dll') -and
+    $_.Name -notmatch $cudaPattern
+  } | ForEach-Object { Copy-Item $_.FullName -Destination $llamaDst -Force }
+}
 $llamaSrv = Join-Path $llamaDst 'llama-server.exe'
 if (-not (Test-Path $llamaSrv)) { throw "llama-server.exe failed to stage" }
-Write-Host "llama runtime staged ($((Get-ChildItem $llamaDst | Measure-Object Length -Sum).Sum / 1MB -as [int]) MB, CPU-only)"
+# 两个方向都要断言，缺了任一个都会静默出错：
+#   GPU 版缺 CUDA dll -> llama-server 起来就崩（不是优雅降级，是启动失败）
+#   CPU 版混进 CUDA dll -> 白胖 627MB（回归过一次，见上面第 3 步的注释）
+if ($Gpu) {
+  foreach ($n in @('ggml-cuda.dll', 'cublas64_13.dll', 'cublasLt64_13.dll', 'cudart64_13.dll')) {
+    if (-not (Test-Path (Join-Path $llamaDst $n))) {
+      throw "GPU 版缺少 CUDA 运行时: $n"
+    }
+  }
+} else {
+  $leak = Get-ChildItem $llamaDst -File | Where-Object { $_.Name -match $cudaPattern }
+  if ($leak) {
+    throw ("CPU 版混入了 CUDA 运行时（zip 会平白胖 600MB+）：`n  " +
+           (($leak | Select-Object -ExpandProperty Name) -join "`n  "))
+  }
+}
+$llamaMB = [int]((Get-ChildItem $llamaDst | Measure-Object Length -Sum).Sum / 1MB)
+Write-Host ("llama runtime staged ({0} MB, {1})" -f $llamaMB, $(if ($Gpu) { 'CUDA' } else { 'CPU-only' }))
 
 # ------------------------------------------------------------------ 4) 模型
 $models = @('Qwen3-ASR-0.6B-Q8_0.gguf', 'mmproj-Qwen3-ASR-0.6B-Q8_0.gguf')
@@ -192,18 +259,40 @@ if (-not $SkipZip) {
 
 # ------------------------------------------------------------------ 7) exe
 if (-not $SkipExe) {
-  # 版本号必须与 RimeVMenu.iss 里的 #define 一致（inno 不吃命令行引号里的字符串表达式）
+  # 版本号必须与 RimeVMenu.iss 里的 #define 一致。
+  # iss 里两个 define 各司其职：
+  #   MyVerNum     = 纯数字 a.b.c，VersionInfoVersion 只能用这个（带 -GPU 会被 Inno 拒绝）
+  #   MyAppVersion = 显示 / 输出文件名，GPU 版是 "1.1.0-GPU"
+  # ★ 早先的做法是「临时改写 iss 再还原」，踩了两个坑：
+  #   1) WriteAllText 会把 CRLF 写没、并让 Inno 按 ANSI 解码 —— 中文全变乱码、编译失败；
+  #   2) finally 里还原依赖异常路径，一旦中途抛错就留下脏文件。
+  #   现在改用 ISCC 的 /D 命令行宏覆盖，**完全不碰 iss**，天然可重入、失败无残留。
+  #   注意：/D 的值是 Inno 预处理器表达式，字符串要写成 "..."（带引号），
+  #   因此 PowerShell 侧要用 `" 转义把引号带进参数。
   $issPath = Join-Path $Root 'packaging\RimeVMenu.iss'
   $issText = Get-Content $issPath -Raw
-  if ($issText -notmatch ('#define MyAppVersion "' + [regex]::Escape($Version) + '"')) {
-    throw "version mismatch: build script $Version vs packaging\RimeVMenu.iss (edit the #define there)"
+  if ($issText -notmatch ('#define MyVerNum\s+"' + [regex]::Escape($CPU_VER) + '"')) {
+    throw "version mismatch: build script $CPU_VER vs packaging\RimeVMenu.iss (edit the #define there)"
   }
   $iscc = Join-Path $env:LOCALAPPDATA 'Programs\Inno Setup 6\ISCC.exe'
   if (-not (Test-Path $iscc)) { $iscc = 'C:\Program Files (x86)\Inno Setup 6\ISCC.exe' }
   if (-not (Test-Path $iscc)) { throw 'ISCC.exe not found (install Inno Setup 6)' }
-  & $iscc $issPath
+
+  $isccArgs = @($issPath)
+  if ($Gpu) {
+    # ★ 必须满足两个条件才能覆盖成功，缺一个都会静默编出 CPU 版文件名：
+    #   1) iss 里那两个 define 得包在 #ifndef 里（见 RimeVMenu.iss 顶部注释）；
+    #      不包的话文件里的 #define 永远压过命令行 /D。
+    #   2) /D 的值**不能加引号**。写成 /DMyAppVersion="1.1.0-GPU" 时 Inno 会把
+    #      引号当成值的一部分，导致 OutputBaseFilename 非法、直接编译失败
+    #      （报 "Value of [Setup] section directive OutputBaseFileName is invalid"）。
+    $isccArgs += "/DMyAppVersion=$VerTag"
+    $isccArgs += "/DMyStageDir=..\stage\RimeVMenu-$VerTag"
+    Write-Host "ISCC: MyAppVersion=$VerTag  MyStageDir=..\stage\RimeVMenu-$VerTag"
+  }
+  & $iscc @isccArgs
   if ($LASTEXITCODE -ne 0) { throw "ISCC failed: $LASTEXITCODE" }
-  $exePath = Join-Path $Out "RimeVMenu-Setup-$Version.exe"
+  $exePath = Join-Path $Out "RimeVMenu-Setup-$VerTag.exe"
   if (-not (Test-Path $exePath)) { throw "installer not produced: $exePath" }
   Write-Host ("exe: {0}  ({1} MB)" -f $exePath, [math]::Round((Get-Item $exePath).Length / 1MB))
 }
