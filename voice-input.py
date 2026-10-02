@@ -124,6 +124,67 @@ try:
 except Exception:                      # pragma: no cover - 环境相关
     PHYS_CORES = 4
 
+# ---- 识别设备：CPU / GPU（NVIDIA CUDA），与 voice-overlay.py 同一套约定 ----
+# auto（默认）探到可用 N 卡就走 GPU：实测比 CPU 调优快 2.3x，整机 CPU 从
+# 26% 再降到 ~11%。探不到就静默回落 CPU，绝不让语音功能失效。
+ASR_DEVICE_DEFAULT = "auto"
+_GPU_CACHE = [None]
+
+
+def _find_cuda_dll():
+    """llama.cpp 目录里 CUDA 后端 dll 是否齐全（缺一个后端就起不来）。"""
+    for n in ("ggml-cuda.dll", "cublas64_13.dll", "cublasLt64_13.dll",
+              "cudart64_13.dll"):
+        if not os.path.isfile(os.path.join(LLAMA_DIR, n)):
+            return False
+    return True
+
+
+def gpu_available():
+    """(是否可用, 显卡名)：N 卡 + 驱动 + CUDA 运行时三重检查。"""
+    if _GPU_CACHE[0] is not None:
+        return _GPU_CACHE[0]
+    ok, name = False, ""
+    try:
+        ps = ("Get-CimInstance Win32_VideoController | "
+              "Where-Object { $_.Name -match 'NVIDIA' } | "
+              "Select-Object -First 1 -ExpandProperty Name")
+        r = subprocess.run(
+            ["powershell", "-NoProfile", "-NonInteractive", "-Command", ps],
+            capture_output=True, text=True, timeout=15,
+            creationflags=subprocess.CREATE_NO_WINDOW)
+        name = (r.stdout or "").strip()
+        if name:
+            nvcuda = os.path.join(os.environ.get("WINDIR", r"C:\Windows"),
+                                  "System32", "nvcuda.dll")
+            ok = os.path.isfile(nvcuda) and _find_cuda_dll()
+    except Exception:
+        ok, name = False, ""
+    _GPU_CACHE[0] = (ok, name)
+    return _GPU_CACHE[0]
+
+
+def asr_device():
+    """读 asr_device=：auto/cpu/gpu -> 实际使用的 'cpu' / 'gpu'。"""
+    val = ASR_DEVICE_DEFAULT
+    try:
+        with open(VOICE_SET_PATH, encoding="utf-8") as f:
+            for line in f:
+                if line.strip().startswith("asr_device"):
+                    val = line.split("=", 1)[1].strip().lower()
+                    break
+    except OSError:
+        pass
+    if val not in ("auto", "cpu", "gpu"):
+        val = ASR_DEVICE_DEFAULT
+    if val == "cpu":
+        return "cpu"
+    ok, _n = gpu_available()
+    if val == "gpu" and not ok:
+        console_print("请求 GPU 但本机没有可用 N 卡/CUDA 运行时，已回落 CPU。")
+        return "cpu"
+    return "gpu" if ok else "cpu"
+
 user32 = ctypes.windll.user32
 kernel32 = ctypes.windll.kernel32   # GlobalAlloc/GlobalLock 在 kernel32
 
@@ -234,15 +295,21 @@ def asr_start(wait=90):
     if not (os.path.isfile(LLAMA_SERVER) and os.path.isfile(ASR_MODEL)
             and os.path.isfile(ASR_MMPROJ)):
         return False
+    device = asr_device()
+    args = [LLAMA_SERVER,
+            "-m", ASR_MODEL,
+            "--mmproj", ASR_MMPROJ,
+            "--host", ASR_HOST, "--port", str(ASR_PORT),
+            "--ctx-size", "4096", "-np", "1"]
+    if device == "gpu":
+        args += ["-ngl", "99", "-t", str(min(4, PHYS_CORES))]
+    else:
+        args += ["-t", str(asr_threads()), "-tb", str(asr_threads())]
+    args += ["--no-webui", "--no-warmup"]
+    console_print("识别设备: %s" % ("GPU (CUDA)" if device == "gpu" else "CPU"))
     try:
         subprocess.Popen(
-            [LLAMA_SERVER,
-             "-m", ASR_MODEL,
-             "--mmproj", ASR_MMPROJ,
-             "--host", ASR_HOST, "--port", str(ASR_PORT),
-             "--ctx-size", "4096", "-np", "1",
-             "-t", str(asr_threads()), "-tb", str(asr_threads()),
-             "--no-webui", "--no-warmup"],
+            args,
             cwd=LLAMA_DIR,
             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,

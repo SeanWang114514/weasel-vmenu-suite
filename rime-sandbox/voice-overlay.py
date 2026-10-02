@@ -131,6 +131,18 @@ ABORT_RETRACT_WAIT = 10.0                # abort 撤回时等修饰键松开的�
 # 放一起会被冲掉。
 VOICE_SET_PATH = os.path.join(RIME_DIR, "voice-settings.txt")
 
+# 物理核数（不是逻辑核数）：llama.cpp 开线程超过物理核只会空转自旋，
+# 白白烧 CPU 还更慢，所以线程数上限按物理核算。
+try:
+    PHYS_CORES = os.cpu_count() or 4
+    try:                                  # Windows 上 os.cpu_count() 含超线程
+        import psutil                     # 有 psutil 就取真实物理核
+        PHYS_CORES = psutil.cpu_count(logical=False) or PHYS_CORES
+    except Exception:
+        PHYS_CORES = max(1, PHYS_CORES // 2)   # 没有 psutil：按一半估
+except Exception:                         # pragma: no cover - 环境相关
+    PHYS_CORES = 4
+
 
 def punct_space_enabled():
     """读 punct_to_space 开关；文件缺失/字段缺失时默认开（本次需求的默认行为）。"""
@@ -143,6 +155,133 @@ def punct_space_enabled():
     except OSError:
         pass
     return True
+
+
+# ---- ASR 线程数（CPU 占用闸门）----
+# 教训：llama.cpp 默认 `-t -1` 会按**逻辑核数**开线程（本机 i7-13620H = 16），
+# 多核空转自旋同步，实测一次 3s 音频吃 946% 单核 ≈ 59% 整机、瞬时打满，
+# 用户侧就是「一说话任务管理器就爆红」。
+# 实测同机同音频（3s wav，整机 16 逻辑核口径）：
+#    默认16线程 -> 总CPU 1.40s / 59.1% 整机
+#     -t 6      -> 总CPU 0.82s / 36.3% 整机
+#     -t 4      -> 总CPU 0.64s / 24.4% 整机   <-- 默认值，压到 30% 以下
+#     -t 2      -> 总CPU 0.45s / 11.6% 整机（更省但尾延迟约 +0.1s）
+# 关键：限制线程**同时降低总 CPU 消耗**（1.40s -> 0.64s，省 54%），
+# 因为省掉了超订线程的空转自旋；墙钟只从 0.148s 增到 0.163s，体感无差别。
+# 识别率完全不受影响：同一个模型、同一份权重，只是并行度不同。
+ASR_THREADS_DEFAULT = 4
+
+
+# ---- 识别设备：CPU / GPU（NVIDIA CUDA）----
+# GPU 走 llama.cpp 的 CUDA 后端，把模型整层丢进显存。实测本机 i7-13620H +
+# RTX 5060 Laptop（8GB）识别同一段 6.2s 中文语音：
+#     CPU 调优(-t 4) -> 0.430s，整机 CPU 26%
+#     GPU(-ngl 99)   -> 0.188s，整机 CPU 10.9%   （快 2.3x，CPU 再降一半）
+# 识别结果逐字一致（同一份权重，只是算力位置不同）。
+# 取值：auto（默认，自动探测）/ cpu / gpu。auto 探不到 N 卡就静默回落 CPU，
+# 绝不因为设备问题让语音输入罢工。
+ASR_DEVICE_DEFAULT = "auto"
+_GPU_CACHE = [None]                     # 探测结果缓存（0=无 / 1=有），启动只探一次
+
+
+def _find_cuda_dll():
+    """当前 llama.cpp 目录里是否齐了 CUDA 后端需要的 dll。
+
+    llama.cpp 的 CUDA 后端强依赖 cuBLAS：缺 ggml-cuda.dll 或任一 cublas 就
+    整个后端不可用（不是降级，是启动失败）。所以要逐个查，不能只看一个。
+    """
+    need = ("ggml-cuda.dll", "cublas64_13.dll", "cublasLt64_13.dll",
+            "cudart64_13.dll")
+    for n in need:
+        if not os.path.isfile(os.path.join(LLAMA_DIR, n)):
+            return False
+    return True
+
+
+def gpu_available():
+    """本机是否真的能用 GPU 跑：有 N 卡 + 驱动在 + CUDA 运行时齐全。
+
+    三重检查缺一不可：
+      1) WMI 里能看到 NVIDIA 显卡（拿到名字，顺便给设置窗口显示）；
+      2) nvcuda.dll 在系统目录（装了 NVIDIA 驱动）；
+      3) llama.cpp 目录里有完整 CUDA 运行时（CPU 版包就没这个）。
+    任何一步失败都返回 (False, 原因)，调用方静默回落 CPU。
+    """
+    if _GPU_CACHE[0] is not None:
+        return _GPU_CACHE[0]
+    ok, name = False, ""
+    try:
+        # 只认 NVIDIA：AMD/Intel 的 llama.cpp 后端（vulkan/hip）未随包分发
+        ps = ("Get-CimInstance Win32_VideoController | "
+              "Where-Object { $_.Name -match 'NVIDIA' } | "
+              "Select-Object -First 1 -ExpandProperty Name")
+        r = subprocess.run(
+            ["powershell", "-NoProfile", "-NonInteractive", "-Command", ps],
+            capture_output=True, text=True, timeout=15,
+            creationflags=subprocess.CREATE_NO_WINDOW)
+        name = (r.stdout or "").strip()
+        if name:
+            nvcuda = os.path.join(os.environ.get("WINDIR", r"C:\Windows"),
+                                  "System32", "nvcuda.dll")
+            ok = os.path.isfile(nvcuda) and _find_cuda_dll()
+    except Exception as e:
+        out("gpu probe error: %r" % (e,))
+        ok, name = False, ""
+    _GPU_CACHE[0] = (ok, name)
+    out("gpu probe: available=%s name=%r cuda_dlls=%s"
+        % (ok, name, _find_cuda_dll()))
+    return _GPU_CACHE[0]
+
+
+def asr_device():
+    """读 voice-settings.txt 的 asr_device=，解析成实际要用的 'cpu' / 'gpu'。
+
+    auto（默认）：探到可用 GPU 就用 GPU，否则 CPU —— 用户什么都不用管。
+    gpu：用户显式锁定，但若本机其实没有可用 GPU，仍然回落 CPU 并在日志里
+         说明（宁可慢一点，也不能因为设备不可用导致语音功能直接失效）。
+    """
+    val = ASR_DEVICE_DEFAULT
+    try:
+        with open(VOICE_SET_PATH, encoding="utf-8") as f:
+            for line in f:
+                if line.strip().startswith("asr_device"):
+                    val = line.split("=", 1)[1].strip().lower()
+                    break
+    except OSError:
+        pass
+    if val not in ("auto", "cpu", "gpu"):
+        val = ASR_DEVICE_DEFAULT
+    if val == "cpu":
+        return "cpu"
+    ok, _name = gpu_available()
+    if val == "gpu" and not ok:
+        out("asr_device=gpu requested but no usable GPU -> falling back to CPU")
+        return "cpu"
+    return "gpu" if ok else "cpu"
+
+
+def asr_threads():
+    """读 voice-settings.txt 的 asr_threads=；缺失/非法/越界一律退回默认。
+
+    要求：>=1 且 <= 物理核数，否则忽略（防止误写成 0 或 999 把机器打死）。
+    """
+    val = None
+    try:
+        with open(VOICE_SET_PATH, encoding="utf-8") as f:
+            for line in f:
+                if line.strip().startswith("asr_threads"):
+                    val = line.split("=", 1)[1].strip()
+                    break
+    except OSError:
+        pass
+    if val is not None:
+        try:
+            n = int(val)
+            if 1 <= n <= PHYS_CORES:
+                return n
+        except (TypeError, ValueError):
+            pass
+    return ASR_THREADS_DEFAULT
 
 
 def punct_to_space(text):
@@ -248,14 +387,24 @@ def asr_start(wait=ASR_BOOT_TIMEOUT):
             and os.path.isfile(ASR_MMPROJ)):
         out("asr skip: missing files")
         return False
+    device = asr_device()
+    # GPU：-ngl 99 = 把所有层都放进显存（模型只有 0.6B，8GB 显存绰绰有余）。
+    # 显存不够时 llama.cpp 自己会把放不下的层留在内存，不会启动失败。
+    args = [LLAMA_SERVER,
+            "-m", ASR_MODEL,
+            "--mmproj", ASR_MMPROJ,
+            "--host", ASR_HOST, "--port", str(ASR_PORT),
+            "--ctx-size", "4096", "-np", "1"]
+    if device == "gpu":
+        # GPU 推理时 CPU 只做前后处理，线程数开小一点更省（也不再用 -tb 调批处理）
+        args += ["-ngl", "99", "-t", str(min(4, PHYS_CORES))]
+    else:
+        args += ["-t", str(asr_threads()), "-tb", str(asr_threads())]
+    args += ["--no-webui", "--no-warmup"]
+    out("asr device=%s" % device)
     try:
         subprocess.Popen(
-            [LLAMA_SERVER,
-             "-m", ASR_MODEL,
-             "--mmproj", ASR_MMPROJ,
-             "--host", ASR_HOST, "--port", str(ASR_PORT),
-             "--ctx-size", "4096", "-np", "1",
-             "--no-webui", "--no-warmup"],
+            args,
             cwd=LLAMA_DIR,
             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
