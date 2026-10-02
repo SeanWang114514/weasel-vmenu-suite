@@ -220,6 +220,7 @@ internal partial class MainForm : Form
         Data.LoadFuzzySettings();
         Data.LoadCandSettings();
         Data.LoadSmartPunctSettings();
+        Data.LoadGridSettings();
         Data.LoadKeys();
 
         pageLoading = true;
@@ -227,6 +228,7 @@ internal partial class MainForm : Form
         {
             cmbPage.SelectedItem = Data.PageSize.ToString();
             if (cmbPage.SelectedItem == null) cmbPage.SelectedIndex = 0;
+            RefreshGridState();
         }
         finally { pageLoading = false; }
 
@@ -346,12 +348,14 @@ internal partial class MainForm : Form
             Data.LoadVoiceSettings();
             Data.LoadFuzzySettings();
             Data.LoadCandSettings();
+            Data.LoadGridSettings();
             Data.LoadKeys();
             pageLoading = true;
             try
             {
                 cmbPage.SelectedItem = Data.PageSize.ToString();
                 if (cmbPage.SelectedItem == null) cmbPage.SelectedIndex = 0;
+                RefreshGridState();
             }
             finally { pageLoading = false; }
             UpdateMiControls();
