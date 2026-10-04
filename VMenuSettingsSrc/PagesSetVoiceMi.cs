@@ -56,6 +56,11 @@ internal partial class MainForm : Form
     private TrackBar trkCpu;
     private Label lblCpuCur, lblCpuHint;
 
+    // ---- 悬浮球（重启）卡片 ----
+    private AppleCard cardOverlay;
+    private Label lblOvState, lblOvHint;
+    private AppleButton btnOvRestart, btnOvRefresh;
+
     // ---- 防误触页 ----
     private AppleCard cardMi;
     private CheckBox chkMiEnable;
@@ -581,7 +586,7 @@ internal partial class MainForm : Form
             UpdateDeviceState();
             UpdateCpuState();
             Status("识别设备已保存：" + cmbDevice.SelectedItem +
-                "（重新打开一次语音输入后生效）");
+                "（点下方「重启悬浮球」按钮后生效）");
         };
 
         // ===== 语音识别 CPU 占用卡片（线程数）=====
@@ -608,10 +613,11 @@ internal partial class MainForm : Form
         lblCpuHint.ForeColor = Theme.Sub;
         lblCpuHint.Font = Theme.Hint;
         lblCpuHint.Text =
-            "识别线程数越少，CPU 占用越低，识别会略慢一点（模型和识别率完全不变）。\n" +
-            "默认 4 线程，实测整机占用约 26%（原来 16 线程约 59%，且总耗电更高）。\n" +
+            "识别线程数越少，CPU 占用越低，识别会略慢一点。\n" +
+            "模型和识别率完全不变，只改并行度。\n" +
+            "默认 4 线程约 26%；16 线程约 59%，且总耗电更高。\n" +
             "本机物理核数：" + Data.PhysCores() + " —— 超过物理核只会空转自旋，越开越慢。\n" +
-            "用 GPU 时这项不生效（GPU 推理 CPU 只做前后处理）；改动重启悬浮球后生效。";
+            "用 GPU 时这项不生效（GPU 只做前后处理）；改动后点下方「重启悬浮球」生效。";
 
         cardCpu.Controls.Add(trkCpu);
         cardCpu.Controls.Add(lblCpuCur);
@@ -624,7 +630,7 @@ internal partial class MainForm : Form
             Data.AsrThreads = trkCpu.Value;
             Data.SaveVoiceSettings();
             UpdateCpuState();
-            Status("语音识别线程数已保存：" + Data.AsrThreads + "（重启悬浮球后生效）");
+            Status("语音识别线程数已保存：" + Data.AsrThreads + "（点下方「重启悬浮球」按钮后生效）");
         };
 
         // ===== 语音输入快捷键卡片 =====
@@ -679,6 +685,47 @@ internal partial class MainForm : Form
             lblHotState.ForeColor = Theme.Green;
             Status("语音快捷键已恢复默认：" + disp);
         };
+
+        // ===== 悬浮球（重启）卡片 =====
+        // 为什么需要这个按钮：识别设备（CPU/GPU）、识别线程数这类设置是悬浮球**启动时**
+        // 读一次就定死的（llama-server 的 -ngl / -t 都是进程级参数，改了必须重开推理
+        // 进程），所以上面几张卡片的说明里都写着「重启悬浮球后生效」。以前用户只能自己
+        // 去 Rime 目录里双击「语音输入-悬浮球.bat」，这里给一个按钮就地完成。
+        cardOverlay = new AppleCard("语音输入（悬浮球）", Theme.Bg, 12);
+
+        lblOvState = new Label();
+        lblOvState.ForeColor = Theme.Green;
+        lblOvState.AutoSize = false;
+
+        btnOvRestart = AppleButton.Make("↻ 重启悬浮球", "Primary", 210, 38);
+        btnOvRestart.Font = new Font("Microsoft YaHei UI", 10.5f, FontStyle.Bold);
+
+        btnOvRefresh = AppleButton.Make("刷新状态", "Plain", 110, 38);
+
+        lblOvHint = new Label();
+        lblOvHint.ForeColor = Theme.Sub;
+        lblOvHint.Font = Theme.Hint;
+        // 三行都要短：本机显示缩放较大，Label 宽度不够时中文会折行，
+        // 折出来的第 4 行会被固定高度的框裁掉（实测第一版就这么被截断了：
+        // 第 2 行末尾断在「…是热生效的，不」，第 3 行整行看不见）。
+        // 每行控制在 ~28 个汉字以内，框高 74 与本页 CPU 卡片的四行说明同值。
+        lblOvHint.Text =
+            "重启 = 关掉当前悬浮球再重新拉起（约 1~3 秒）。\n" +
+            "改过「识别设备 / 线程数」后必须重启才生效。\n" +
+            "标点转空格、快捷键热生效；没反应也可点这里恢复。";
+
+        cardOverlay.Controls.AddRange(new Control[]
+        {
+            lblOvState, btnOvRestart, btnOvRefresh, lblOvHint
+        });
+        tabVoice.Controls.Add(cardOverlay);
+
+        btnOvRefresh.Click += delegate
+        {
+            UpdateOverlayState();
+            Status("已刷新悬浮球状态");
+        };
+        btnOvRestart.Click += delegate { RestartOverlay(); };
     }
 
     // 录制收尾：停表、清状态，**最重要的是把 hotkey_recorder_pid 清掉并写回文件**，
@@ -915,7 +962,7 @@ internal partial class MainForm : Form
                 "GPU 加速需要 NVIDIA 显卡 + 驱动 + 安装包自带 CUDA 运行时，三者齐全才生效。\n" +
                 "「自动」：能用 GPU 就用，用不了静默回落 CPU —— 推荐保持默认，不用管。\n" +
                 "实测（RTX 5060 Laptop / 同一段 6.2 秒语音）：GPU 0.19 秒、占用 11%；CPU 0.43 秒、占用 26%。\n" +
-                "改动即时保存，重新打开一次语音输入（重启悬浮球）后生效。";
+                "改动即时保存，点下方「重启悬浮球」按钮后生效。";
         }
     }
 
@@ -933,6 +980,184 @@ internal partial class MainForm : Form
         lblCpuCur.ForeColor = gpuOn ? Theme.Tert
                             : n <= 4 ? Theme.Green : n <= 6 ? Theme.Accent : Theme.Danger;
         trkCpu.Enabled = !gpuOn;      // GPU 模式下 CPU 只做前后处理，滑块无意义
+    }
+
+    // ---- 悬浮球进程：查询 / 重启 ----
+    // 悬浮球有两种启动方式：打包版 VoiceOverlay.exe，源码版 pythonw voice-overlay.py。
+    // **两个都要查** —— 只杀其中一个会留下另一个占着单实例互斥量，新进程一起来就自己
+    // 退了，表现成「点了重启，但状态还是运行中 / 或者干脆没了」。
+    //
+    // 为什么要区分「根进程」和「全部进程」：打包版是 PyInstaller onefile，
+    // 一个悬浮球在任务管理器里是**两个** VoiceOverlay.exe（引导进程 + 它 fork 出来的
+    // 真正跑起来的那一个，父进程就是引导进程）。状态行只该显示一个 PID，否则用户
+    // 看到「运行中（PID 27188, 21180）」会以为开了两个；但杀的时候必须两个都杀。
+    private class OverlayProc
+    {
+        public int Pid;
+        public int ParentPid;
+    }
+
+    private List<OverlayProc> OverlayProcs()
+    {
+        List<OverlayProc> list = new List<OverlayProc>();
+        int self = Process.GetCurrentProcess().Id;
+        try
+        {
+            foreach (System.Management.ManagementObject mo in new System.Management.ManagementObjectSearcher(
+                         "SELECT ProcessId, ParentProcessId, Name, CommandLine FROM Win32_Process " +
+                         "WHERE Name='VoiceOverlay.exe' OR Name='pythonw.exe'").Get())
+            {
+                int pid = Convert.ToInt32(mo["ProcessId"]);
+                if (pid == self) continue;                    // 别把自己算进去
+                string name = Convert.ToString(mo["Name"]);
+                bool isOverlay;
+                if (string.Equals(name, "VoiceOverlay.exe", StringComparison.OrdinalIgnoreCase))
+                    isOverlay = true;
+                else
+                {
+                    string cmd = Convert.ToString(mo["CommandLine"]);
+                    isOverlay = cmd != null &&
+                        cmd.IndexOf("voice-overlay.py", StringComparison.OrdinalIgnoreCase) >= 0;
+                }
+                if (!isOverlay) continue;
+                OverlayProc p = new OverlayProc();
+                p.Pid = pid;
+                try { p.ParentPid = Convert.ToInt32(mo["ParentProcessId"]); } catch { p.ParentPid = 0; }
+                list.Add(p);
+            }
+        }
+        catch { }
+        return list;
+    }
+
+    private List<int> OverlayPids()
+    {
+        List<int> pids = new List<int>();
+        foreach (OverlayProc p in OverlayProcs()) pids.Add(p.Pid);
+        return pids;
+    }
+
+    // 只留「根」进程用于显示：父进程不是另一个悬浮球进程的那些。
+    // PyInstaller 的引导进程才是根，子进程是它自己拉起来的。
+    private List<int> OverlayRootPids()
+    {
+        List<OverlayProc> all = OverlayProcs();
+        List<int> allPids = new List<int>();
+        foreach (OverlayProc p in all) allPids.Add(p.Pid);
+        List<int> roots = new List<int>();
+        foreach (OverlayProc p in all)
+            if (!allPids.Contains(p.ParentPid)) roots.Add(p.Pid);
+        if (roots.Count == 0)
+            foreach (OverlayProc p in all) roots.Add(p.Pid);   // 兜底：全都有父进程在列表里
+        return roots;
+    }
+
+    private void UpdateOverlayState()
+    {
+        if (lblOvState == null) return;
+        List<int> pids = OverlayRootPids();
+        if (pids.Count > 0)
+        {
+            string joined = "";
+            for (int i = 0; i < pids.Count; i++)
+            {
+                if (i > 0) joined += ", ";
+                joined += pids[i].ToString();
+            }
+            lblOvState.Text = "当前：运行中（PID " + joined + "）";
+            lblOvState.ForeColor = Theme.Green;
+        }
+        else
+        {
+            lblOvState.Text = "当前：未运行 —— 按住快捷键不会有反应，点右边按钮拉起";
+            lblOvState.ForeColor = Theme.Danger;
+        }
+    }
+
+    // 阻塞式重启：先杀干净、等进程**真的**退出，再拉起，最后等它真起来才报成功。
+    // 为什么必须等退出：单实例互斥量随进程句柄释放，不等就拉，新进程撞上旧互斥量会
+    // 直接静默退出，看起来像「重启没用」。为什么必须等起来：打包版是 93MB 的
+    // PyInstaller onefile，冷启动要几秒，报早了等于骗人。
+    // 期间按钮置灰 + DoEvents 让界面刷新，避免用户连点几个重启流程互相抢进程。
+    private void RestartOverlay()
+    {
+        btnOvRestart.Enabled = false;
+        btnOvRefresh.Enabled = false;
+        lblOvState.Text = "正在重启…";
+        lblOvState.ForeColor = Theme.Tert;
+        Status("正在重启悬浮球…");
+        Application.DoEvents();
+
+        try
+        {
+            // 迭代杀：PyInstaller onefile 的引导进程可能在第一次枚举之后才 fork 出
+            // 真正干活的那个子进程，只杀一轮会漏掉它（漏掉的那个占着单实例互斥量，
+            // 后面拉起来的新进程会立刻自杀）。所以每 200ms 重新枚举一次、补杀。
+            DateTime deadline = DateTime.Now.AddSeconds(6);
+            while (DateTime.Now < deadline)
+            {
+                List<int> now = OverlayPids();
+                if (now.Count == 0) break;
+                foreach (int pid in now)
+                {
+                    try { Process.GetProcessById(pid).Kill(); }
+                    catch { }
+                }
+                Application.DoEvents();
+                Thread.Sleep(200);
+            }
+
+            string exe = Path.Combine(Data.RimeDir, "VoiceOverlay.exe");
+            string py = Path.Combine(Data.RimeDir, "voice-overlay.py");
+            string err = null;
+            if (File.Exists(exe))
+            {
+                ProcessStartInfo psi = new ProcessStartInfo(exe);
+                psi.WorkingDirectory = Data.RimeDir;
+                psi.UseShellExecute = true;
+                Process.Start(psi);
+            }
+            else if (File.Exists(py))
+            {
+                string pw = null;
+                foreach (string p in (Environment.GetEnvironmentVariable("PATH") ?? "").Split(';'))
+                {
+                    if (p.Length == 0) continue;
+                    string cand = Path.Combine(p.Trim(), "pythonw.exe");
+                    if (File.Exists(cand)) { pw = cand; break; }
+                }
+                if (pw == null) err = "没找到 VoiceOverlay.exe，也没装 pythonw.exe";
+                else
+                {
+                    ProcessStartInfo psi = new ProcessStartInfo(pw, "\"" + py + "\"");
+                    psi.WorkingDirectory = Data.RimeDir;
+                    psi.UseShellExecute = true;
+                    Process.Start(psi);
+                }
+            }
+            else err = "在 " + Data.RimeDir + " 里找不到 VoiceOverlay.exe / voice-overlay.py";
+
+            if (err == null)
+            {
+                deadline = DateTime.Now.AddSeconds(10);
+                while (DateTime.Now < deadline && OverlayPids().Count == 0)
+                {
+                    Application.DoEvents();
+                    Thread.Sleep(200);
+                }
+                if (OverlayPids().Count == 0)
+                    err = "进程已拉起，但 10 秒内没检测到，请看右下角图标";
+            }
+            Status(err == null
+                ? "悬浮球已重启（识别设备 / 线程数的新设置已生效）"
+                : "重启悬浮球：" + err);
+        }
+        finally
+        {
+            btnOvRestart.Enabled = true;
+            btnOvRefresh.Enabled = true;
+            UpdateOverlayState();
+        }
     }
 
     private void UpdateVoiceControls()
@@ -959,6 +1184,7 @@ internal partial class MainForm : Form
             }
         }
         finally { voiceLoading = false; }
+        UpdateOverlayState();
         // 快捷键显示（正在录制时别把进行中的提示刷掉）
         if (btnHotkey == null) return;
         if (hotState != "") return;
@@ -967,7 +1193,6 @@ internal partial class MainForm : Form
         lblHotState.Text = "当前：" + disp + "（长按说话，松开结束）";
         lblHotState.ForeColor = Theme.Green;
     }
-
     // ================================================================ 防误触
     private void BuildMiCard()
     {
@@ -1169,13 +1394,21 @@ internal partial class MainForm : Form
         lblDevCur.SetBounds(292, 40, cwv - 310, 22);
         lblDevState.SetBounds(18, 74, cwv - 36, 22);
         lblDevHint.SetBounds(18, 102, cwv - 36, 96);
-        // CPU 占用卡片：滑块一行 + 状态一行 + 说明四行
-        cardCpu.SetBounds(16, 416, cwv, 176);
+        // CPU 占用卡片：滑块一行 + 状态一行 + 说明五行
+        //（说明从 4 行变 5 行：本机缩放下 "用 GPU 时这项不生效…" 那行会折行，
+        //  仍按 4 行给高度的话最后一行会被裁掉。实测就是断在「…按钮」后面。）
+        cardCpu.SetBounds(16, 416, cwv, 198);
         trkCpu.SetBounds(16, 34, cwv - 32, 34);
         lblCpuCur.SetBounds(18, 72, cwv - 36, 22);
-        lblCpuHint.SetBounds(18, 96, cwv - 36, 74);
+        lblCpuHint.SetBounds(18, 96, cwv - 36, 96);
+        // 悬浮球卡片：状态一行 + 两个按钮一行 + 说明三行
+        cardOverlay.SetBounds(16, 630, cwv, 194);
+        lblOvState.SetBounds(18, 36, cwv - 36, 22);
+        btnOvRestart.SetBounds(18, 64, 210, 38);
+        btnOvRefresh.SetBounds(238, 64, 110, 38);
+        lblOvHint.SetBounds(18, 112, cwv - 36, 74);
         // 快捷键卡片：按钮一行 + 状态一行 + 说明三行
-        cardHotkey.SetBounds(16, 602, cwv, 196);
+        cardHotkey.SetBounds(16, 840, cwv, 196);
         lblHotCur.SetBounds(18, 42, 130, 24);
         btnHotkey.SetBounds(150, 32, 330, 40);
         btnHotReset.SetBounds(494, 35, 140, 34);
