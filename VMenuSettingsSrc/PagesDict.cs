@@ -1,4 +1,4 @@
-﻿// PagesDict.cs —— 词库管理页（原 dict-manager.ps1 集成：加词自动注音、权重、
+// PagesDict.cs —— 词库管理页（原 dict-manager.ps1 集成：加词自动注音、权重、
 // 删除、搜索、加入常用语）
 
 using System;
@@ -51,7 +51,7 @@ internal partial class MainForm : Form
 
         dictBadge = new AppleBadge("共 0 条", 0, 0, 92, 24);
 
-        dictCardList = new AppleCard("已加词语", Theme.Bg, 12);
+        dictCardList = new AppleCard("已加词语", Theme.Bg, Theme.RadiusCard);
         dictSearchP = new AppleField(0, 0, 190, 28, "", false, false, false);
         Theme.SetPlaceholder(dictSearch, "搜索词语或拼音");
         btnDictRefresh = AppleButton.Make("刷新", "Plain", 70, 28);
@@ -79,7 +79,7 @@ internal partial class MainForm : Form
         btnDictWeight = AppleButton.Make("更新权重", "Plain", 100, 30);
         btnDictDelete = AppleButton.Make("删除所选", "DangerOutline", 100, 30);  // 删除=红
 
-        dictCardAdd = new AppleCard("添加新词", Theme.Bg, 12);
+        dictCardAdd = new AppleCard("添加新词", Theme.Bg, Theme.RadiusCard);
         dictLblWord = MakeSmallLabel("词语 *");
         dictLblPy = MakeSmallLabel("拼音（空格分隔）");
         dictLblWt = MakeSmallLabel("权重");
@@ -94,7 +94,7 @@ internal partial class MainForm : Form
         dictTip.ForeColor = Theme.Tert;
         dictTip.Text = "输入词语后自动标注拼音（可手动修改），权重越大排名越靠前。";
 
-        dictCardPath = new AppleCard("", Theme.Bg, 12);
+        dictCardPath = new AppleCard("", Theme.Bg, Theme.RadiusCard);
         dictPathLabel = new Label();
         dictPathLabel.Font = Theme.Hint;
         dictPathLabel.ForeColor = Theme.Sub;

@@ -5,6 +5,7 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Drawing;
+using System.Globalization;
 using System.IO;
 using System.Threading;
 using System.Windows.Forms;
@@ -56,6 +57,23 @@ internal partial class MainForm : Form
     private TrackBar trkCpu;
     private Label lblCpuCur, lblCpuHint;
 
+    // ---- 「替换预览」速度卡片（恒定总时长）----
+    private AppleCard cardPace;
+    private AppleField txtPaceP;
+    private Label lblPaceCur, lblPaceHint, lblPaceRange;
+    private AppleButton btnPaceReset;
+    private TrackBar trkPace;
+    private CheckBox chkFast;
+    private TextBox txtPace { get { return txtPaceP.TextBox; } }
+
+    // ---- 音频输入设备（麦克风）卡片 ----
+    private AppleCard cardMic;
+    private AppleField cmbMicP;
+    private Label lblMicCur, lblMicHint;
+    private AppleButton btnMicRefresh;
+    private ComboBox cmbMic { get { return cmbMicP.Combo; } }
+    private List<int> micDevIdx = new List<int>();   // 下拉项 -> sounddevice 设备索引
+
     // ---- 悬浮球（重启）卡片 ----
     private AppleCard cardOverlay;
     private Label lblOvState, lblOvHint;
@@ -92,7 +110,7 @@ internal partial class MainForm : Form
     {
         cardFuzzy = new AppleCard(
             "前后鼻音模糊输入（总开关 + 逐对：an/ang、en/eng、in/ing、ian/iang、uan/uang）",
-            Theme.Bg, 12);
+            Theme.Bg, Theme.RadiusCard);
 
         chkFuzzy = new CheckBox();
         chkFuzzy.Text = "允许模糊输入（前鼻音当后鼻音打也能出词）";
@@ -204,7 +222,7 @@ internal partial class MainForm : Form
     // ==================================================== 按键 / 英文候选
     private void BuildKeysCard()
     {
-        cardKeys = new AppleCard("中英切换按键与英文候选（自定义）", Theme.Bg, 12);
+        cardKeys = new AppleCard("中英切换按键与英文候选（自定义）", Theme.Bg, Theme.RadiusCard);
 
         chkShiftR = new CheckBox();
         chkShiftR.Text = "右Shift 切换中英文（打到一半也能直接切过去）";
@@ -346,7 +364,7 @@ internal partial class MainForm : Form
     private void BuildSetCards()
     {
         // --- 默认显示条数 ---
-        cardPage = new AppleCard("剪贴板列表默认显示条数", Theme.Bg, 12);
+        cardPage = new AppleCard("剪贴板列表默认显示条数", Theme.Bg, Theme.RadiusCard);
         lblPage = new Label();
         lblPage.Text = "默认显示：";
         lblPage.ForeColor = Theme.Text;
@@ -363,7 +381,7 @@ internal partial class MainForm : Form
         cardPage.Controls.AddRange(new Control[] { lblPage, cmbPageP, btnPageSave, lblPageHint });
 
         // --- 候选栏每行数量（写 grid-settings.txt，服务端与 lua 共读）---
-        cardGrid = new AppleCard("候选栏每行数量", Theme.Bg, 12);
+        cardGrid = new AppleCard("候选栏每行数量", Theme.Bg, Theme.RadiusCard);
 
         lblGridCollapsed = new Label();
         lblGridCollapsed.Text = "未展开时每行：";
@@ -399,7 +417,7 @@ internal partial class MainForm : Form
             btnGridSave, lblGridState, lblGridHint });
 
         // --- 缓存清理（破坏性卡片：标题红、按钮实心红）---
-        cardClear = new AppleCard("缓存清理（二次确认）", Theme.Bg, 12);
+        cardClear = new AppleCard("缓存清理（二次确认）", Theme.Bg, Theme.RadiusCard);
         cardClear.TitleColor = Theme.Danger;
         lblClear = new Label();
         lblClear.ForeColor = Theme.Sub;
@@ -409,7 +427,7 @@ internal partial class MainForm : Form
         cardClear.Controls.AddRange(new Control[] { lblClear, btnClearClip, btnClearFav });
 
         // --- 文件位置 ---
-        cardFiles = new AppleCard("文件位置（改动即时写入）", Theme.Bg, 12);
+        cardFiles = new AppleCard("文件位置（改动即时写入）", Theme.Bg, Theme.RadiusCard);
         tbFilesP = new AppleField(18, 32, 860, 134, "", true, true, false);
         tbFiles.Text =
             "剪贴板历史：" + Data.ClipPath + "\r\n" +
@@ -426,7 +444,7 @@ internal partial class MainForm : Form
         cardFiles.Controls.Add(tbFilesP);
 
         // --- 小狼毫原生设置 ---
-        cardNative = new AppleCard("小狼毫原生设置", Theme.Bg, 12);
+        cardNative = new AppleCard("小狼毫原生设置", Theme.Bg, Theme.RadiusCard);
         lblNative = new Label();
         lblNative.ForeColor = Theme.Sub;
         lblNative.Text =
@@ -516,7 +534,7 @@ internal partial class MainForm : Form
     // ================================================================ 语音
     private void BuildVoiceCard()
     {
-        cardPunct = new AppleCard("识别结果里的标点符号", Theme.Bg, 12);
+        cardPunct = new AppleCard("识别结果里的标点符号", Theme.Bg, Theme.RadiusCard);
         chkPunct = new CheckBox();
         chkPunct.Text = "把标点符号转换成空格（，。！？、；：… → 空格）";
         chkPunct.ForeColor = Theme.Text;
@@ -554,7 +572,7 @@ internal partial class MainForm : Form
         //   GPU -> 0.19 秒、整机 CPU 11%      CPU -> 0.43 秒、整机 CPU 26%
         // 识别结果逐字一致（同一份模型权重，只是算力位置不同）。
         // 默认 auto：探测到可用 GPU 就自动用，否则静默回落 CPU，用户不用管。
-        cardDevice = new AppleCard("语音识别设备（GPU 加速）", Theme.Bg, 12);
+        cardDevice = new AppleCard("语音识别设备（GPU 加速）", Theme.Bg, Theme.RadiusCard);
 
         cmbDeviceP = new AppleField(0, 0, 260, 30, "", false, false, true);
         cmbDevice.Items.AddRange(new object[] { "自动（推荐）", "仅 CPU", "强制 GPU" });
@@ -589,12 +607,68 @@ internal partial class MainForm : Form
                 "（点下方「重启悬浮球」按钮后生效）");
         };
 
+        // ===== 音频输入设备（麦克风）卡片 =====
+        // 需求：「给语音输入增加切换音频输入设备的功能」。
+        // 为什么要这张卡片：默认走 Windows 默认设备，但插了 USB 麦 / 开了蓝牙耳机 /
+        // 装了 AudioRelay 这类虚拟声卡之后，系统默认设备经常不是用户想说话的那只，
+        // 结果「按了热键没反应 / 识别不出字」。
+        //
+        // 设备清单不是这里枚举的：设置窗口是纯 .NET，读不到 sounddevice 的设备表。
+        // 悬浮球（Python）启动时会把清单写进 mic-devices.txt，这里只负责读文件 +
+        // 显示。点「刷新设备」就写一个请求文件让悬浮球重写一次，所以插拔麦克风后
+        // 不用重启悬浮球也能刷出来。
+        cardMic = new AppleCard("音频输入设备（麦克风）", Theme.Bg, Theme.RadiusCard);
+
+        cmbMicP = new AppleField(0, 0, 360, 30, "", false, false, true);
+        cmbMic.SelectedIndex = -1;
+
+        btnMicRefresh = AppleButton.Make("↻ 刷新设备", "Plain", 120, 30);
+
+        lblMicCur = new Label();
+        lblMicCur.ForeColor = Theme.Green;
+        lblMicCur.AutoSize = false;
+
+        lblMicHint = new Label();
+        lblMicHint.ForeColor = Theme.Sub;
+        lblMicHint.Font = Theme.Hint;
+        lblMicHint.Text =
+            "默认跟随 Windows 的默认设备。插了 USB 麦、开了蓝牙耳机后如果没声音，在这里选。\n" +
+            "改完即时保存，下一次按住说话就换设备，不用重启悬浮球。\n" +
+            "选中的设备按名字记住：换 USB 口导致编号变化也还能找到它。";
+        // 设备多时下拉列表要够长，否则要滚很久才能看到后面的蓝牙耳机
+        cmbMic.DropDownHeight = 320;
+
+        cardMic.Controls.AddRange(new Control[]
+        {
+            cmbMicP, btnMicRefresh, lblMicCur, lblMicHint
+        });
+        tabVoice.Controls.Add(cardMic);
+
+        cmbMic.SelectedIndexChanged += delegate
+        {
+            if (voiceLoading) return;
+            if (cmbMic.SelectedIndex < 0) return;
+            int idx = cmbMic.SelectedIndex < micDevIdx.Count
+                    ? micDevIdx[cmbMic.SelectedIndex] : -1;
+            string name = MicDisplayName(cmbMic.SelectedItem == null
+                                         ? "" : cmbMic.SelectedItem.ToString());
+            // 存「索引|名字」：悬浮球按名字优先解析，索引只作兜底
+            Data.AsrInputDevice = idx < 0 ? "default" : (idx + "|" + name);
+            Data.SaveVoiceSettings();
+            UpdateMicState();
+            Status(idx < 0
+                ? "音频输入设备：跟随系统默认（下一次说话生效）"
+                : "音频输入设备已保存：" + name + "（下一次说话生效）");
+        };
+
+        btnMicRefresh.Click += delegate { RefreshMicList(true); };
+
         // ===== 语音识别 CPU 占用卡片（线程数）=====
         // llama.cpp 默认按逻辑核数开线程（16 核机就是 16 线程），多核空转自旋会把
         // 整机 CPU 打到 ~59%、瞬时打满；限制到物理核以内实测降到 ~26%，
         // 而且**总 CPU 消耗反而少 54%**（省掉超订线程的同步开销），墙钟只慢约 15ms。
         // 识别率完全不变：同一份权重，只改并行度。
-        cardCpu = new AppleCard("语音识别 CPU 占用", Theme.Bg, 12);
+        cardCpu = new AppleCard("语音识别 CPU 占用", Theme.Bg, Theme.RadiusCard);
 
         trkCpu = new TrackBar();
         trkCpu.Minimum = 1;
@@ -633,11 +707,122 @@ internal partial class MainForm : Form
             Status("语音识别线程数已保存：" + Data.AsrThreads + "（点下方「重启悬浮球」按钮后生效）");
         };
 
+        // ===== 「替换预览」速度卡片（恒定总时长）=====
+        // 需求 v0.2.38：「增加语音识别出结果后替换预览的速度，要求恒定速度，默认 1s」。
+        // 需求 v0.2.39：「我要的是调快替换的时间，我不是要取消部分的替换」。
+        // 说的是这一段：识别出最终结果后，悬浮球要退格删掉流式预览的那截、
+        // 再补发正文。旧实现每格固定 24ms，退得越多等得越久（12 格 0.4s、
+        // 46 格 1.5s）——短句一闪而过、长句拖得难受，而且快慢不可预期。
+        // v0.2.38 改成整段退格**匀速铺满**这个秒数：短句放慢、长句加快，总时长恒定。
+        // 但每格 24ms 是真实键盘注入（keybd_event）的可靠下限，撞上它之后秒数就失效了
+        // ——46 格填 1s 实际要 1.5s，填 0.3s 也一样是 1.5s（「太短」根本快不起来）。
+        // v0.2.39 加了**快通道**：退格直接投给目标的焦点窗口（不过 RIT，没有下限），
+        // 46 格 1~10ms、收全 46/46（WinForms Edit / Chrome 两种真机逐字一致，
+        // 见 tmp/bs-fast-e2e.py、tmp/bs-chrome-e2e.py）。所以现在秒数**真的说了算**：
+        // 0.0 = 立刻替换，而且**一个字都不会少删** —— 这正是本轮需求。
+        // 默认也改成 0.0：默认慢一档就是「每次识别结束白等一秒」，那正是用户报的
+        // 「时长太长」；快通道已证明 0 秒既最快又最完整，不用二选一。
+        cardPace = new AppleCard("识别结果替换预览的时长（0 = 立刻替换）", Theme.Bg, Theme.RadiusCard);
+
+        lblPaceCur = new Label();
+        lblPaceCur.ForeColor = Theme.Green;
+        lblPaceCur.AutoSize = false;
+
+        trkPace = new TrackBar();
+        trkPace.Minimum = (int)Math.Round(Data.ReconcileSecsMin * 10);   // 0.0s -> 0
+        trkPace.Maximum = (int)Math.Round(Data.ReconcileSecsMax * 10);   // 3.0s -> 30
+        trkPace.TickFrequency = 5;
+        trkPace.SmallChange = 1;                                        // 0.1 秒
+        trkPace.LargeChange = 5;                                        // 0.5 秒
+        trkPace.AutoSize = false;
+        trkPace.Height = 34;
+
+        txtPaceP = new AppleField(0, 0, 0, 0, "", false, false, false);
+        txtPace.TextAlign = HorizontalAlignment.Center;
+
+        // ★ 这行必须短，而且必须 AutoSize = false。
+        //   实测踩过：LayoutVoice 里对 AutoSize 的 Label 调 SetBounds 时，**显式的
+        //   宽高会盖掉 AutoSize**（AutoSize 只在 Text/Font 变更时重算，不拦截显式
+        //   SetBounds）。所以「AutoSize = true + 给个够大的宽」是假安全感 —— 文案
+        //   一长就直接被截掉，界面上表现为「（单位秒，范围 0.0 ~ 3.0，0 = 立」这种
+        //   半截话。这里改成固定宽度 + 短文案，长文案（0 = 立刻替换）交给下面
+        //   「当前：」那行去说 —— 那行是整行宽度，放得下。
+        lblPaceRange = new Label();
+        lblPaceRange.Text = "（秒，范围 " + Data.ReconcileSecsMin.ToString("0.0") +
+            " ~ " + Data.ReconcileSecsMax.ToString("0.0") + "）";
+        lblPaceRange.ForeColor = Theme.Sub;
+        lblPaceRange.AutoSize = false;
+
+        btnPaceReset = AppleButton.Make("↺ 恢复默认", "Plain", 130, 30);
+        btnPaceReset.Font = Theme.Sym;
+
+        // 快通道开关。默认开：它又快又**不会丢退格**（消息进目标队列，不经过会把
+        // down/up 合并掉的 RIT）。留这个开关是因为极少数程序不吃投递的键消息
+        // （UWP / XAML 岛那类，悬浮球自己认类名会退回），真遇到了可以关掉。
+        chkFast = new CheckBox();
+        chkFast.Text = "快速替换（退格直接投给目标窗口：快得多，且不会丢退格）";
+        chkFast.ForeColor = Theme.Text;
+        chkFast.AutoSize = true;
+
+        lblPaceHint = new Label();
+        lblPaceHint.ForeColor = Theme.Sub;
+        lblPaceHint.Font = Theme.Hint;
+        lblPaceHint.Text =
+            "识别出结果后，悬浮球要先删掉流式预览、再补上正文。\n" +
+            "默认 0.0 = 立刻替换：一口气删完再补，最快，而且一个字都不会少删。\n" +
+            "调大只是把这段节奏铺开（不随句子长短变，总时长就是这个秒数）。\n" +
+            "改动即时保存，下一次语音识别即生效，不用重启悬浮球。";
+
+        cardPace.Controls.AddRange(new Control[]
+        {
+            trkPace, txtPaceP, lblPaceRange, btnPaceReset, lblPaceCur, chkFast,
+            lblPaceHint
+        });
+        tabVoice.Controls.Add(cardPace);
+
+        // 0.0~3.0 秒共 31 格刻度与文本框互相同步；用 voiceLoading 挡住回填时的事件风暴
+        trkPace.ValueChanged += delegate
+        {
+            if (voiceLoading) return;
+            double v = trkPace.Value / 10.0;
+            txtPace.Text = v.ToString("0.0");
+            Data.ReconcileSecs = v;
+            Data.SaveVoiceSettings();
+            UpdatePaceState();
+            Status("替换预览速度已保存：" + v.ToString("0.0") + " 秒（下一次识别生效）");
+        };
+        txtPace.TextChanged += delegate
+        {
+            if (voiceLoading) return;
+            double v = ParsePace(txtPace.Text);
+            if (v < 0) return;                        // 中间态 / 非法输入（"." / "" / "abc"）
+            int tick = PaceTick(v);                   // 0 是合法值：立刻替换
+            if (trkPace.Value != tick) trkPace.Value = tick;   // 越界会被夹回范围内
+        };
+        btnPaceReset.Click += delegate
+        {
+            trkPace.Value = (int)Math.Round(Data.DefaultReconcileSecs * 10);
+            txtPace.Text = Data.DefaultReconcileSecs.ToString("0.0");
+            Data.ReconcileSecs = Data.DefaultReconcileSecs;
+            Data.SaveVoiceSettings();
+            UpdatePaceState();
+            Status("替换预览速度已恢复默认：" +
+                Data.DefaultReconcileSecs.ToString("0.0") + " 秒");
+        };
+        chkFast.CheckedChanged += delegate
+        {
+            if (voiceLoading) return;
+            Data.FastDelete = chkFast.Checked;
+            Data.SaveVoiceSettings();
+            Status("替换预览" + (Data.FastDelete ? "已改为快速替换" : "已改用真实键盘注入") +
+                "（下一次识别生效）");
+        };
+
         // ===== 语音输入快捷键卡片 =====
         // 点「点击录制」-> 直接在键盘上按想要的组合 -> 松开即录入并保存。
         // 录制用 20ms 轮询 GetAsyncKeyState（不装任何键盘钩子），焦点在哪都录得到；
         // 录制期间悬浮球会暂停热键检测（pid 字段），录完自动恢复。
-        cardHotkey = new AppleCard("语音输入快捷键（按住说话）", Theme.Bg, 12);
+        cardHotkey = new AppleCard("语音输入快捷键（按住说话）", Theme.Bg, Theme.RadiusCard);
 
         lblHotCur = new Label();
         lblHotCur.Text = "当前快捷键：";
@@ -691,7 +876,7 @@ internal partial class MainForm : Form
         // 读一次就定死的（llama-server 的 -ngl / -t 都是进程级参数，改了必须重开推理
         // 进程），所以上面几张卡片的说明里都写着「重启悬浮球后生效」。以前用户只能自己
         // 去 Rime 目录里双击「语音输入-悬浮球.bat」，这里给一个按钮就地完成。
-        cardOverlay = new AppleCard("语音输入（悬浮球）", Theme.Bg, 12);
+        cardOverlay = new AppleCard("语音输入（悬浮球）", Theme.Bg, Theme.RadiusCard);
 
         lblOvState = new Label();
         lblOvState.ForeColor = Theme.Green;
@@ -834,6 +1019,154 @@ internal partial class MainForm : Form
     {
         lblPunctState.Text = "当前：" + (Data.PunctSpace ? "标点 → 空格" : "保留标点");
         lblPunctState.ForeColor = Data.PunctSpace ? Theme.Green : Theme.Tert;
+    }
+
+    // ---- 音频输入设备（麦克风）----
+    // 设备清单由悬浮球（Python + sounddevice）写进 mic-devices.txt，格式每行
+    // `索引|名字`，第一行固定是 `default|系统默认设备…`。设置窗口只读这个文件。
+    private static string MicListPath
+    {
+        get { return Path.Combine(Data.RimeDir, "mic-devices.txt"); }
+    }
+
+    private static string MicRequestPath
+    {
+        get { return Path.Combine(Data.RimeDir, "mic-devices.refresh"); }
+    }
+
+    // 下拉项显示成「索引  名字」，但剥离索引后要能拿回纯名字去存配置
+    private static string MicDisplayName(string item)
+    {
+        int i = item.IndexOf('|');
+        return i >= 0 ? item.Substring(i + 1) : item;
+    }
+
+    /// <summary>读 mic-devices.txt 填下拉框；点了「刷新设备」时先请悬浮球重写清单。</summary>
+    private void RefreshMicList(bool request)
+    {
+        if (cmbMic == null) return;
+        if (request)
+        {
+            // 写请求文件让悬浮球重写清单，然后等它写完（心跳 0.4s 一次，2 秒足够）
+            try { File.WriteAllText(MicRequestPath, "1"); }
+            catch { }
+            DateTime dl = DateTime.Now.AddSeconds(2.5);
+            while (DateTime.Now < dl)
+            {
+                if (!File.Exists(MicRequestPath)) break;
+                Application.DoEvents();
+                Thread.Sleep(100);
+            }
+        }
+
+        List<string> items = new List<string>();
+        micDevIdx = new List<int>();
+        foreach (string line in Data.ReadAllLines(MicListPath))
+        {
+            string s = line.Trim();
+            if (s.Length == 0 || s.StartsWith("#")) continue;
+            int bar = s.IndexOf('|');
+            string idxS = bar >= 0 ? s.Substring(0, bar) : s;
+            string nm = bar >= 0 ? s.Substring(bar + 1) : s;
+            if (s.StartsWith("default|")) { items.Add("系统默认设备（跟随 Windows）"); micDevIdx.Add(-1); continue; }
+            int idx;
+            if (!int.TryParse(idxS, out idx)) continue;
+            items.Add(nm);
+            micDevIdx.Add(idx);
+        }
+
+        voiceLoading = true;
+        try
+        {
+            cmbMic.Items.Clear();
+            if (items.Count == 0)
+            {
+                // 悬浮球没跑过 / 还没写出清单：给个兜底项，别让下拉是空的
+                cmbMic.Items.Add("系统默认设备（跟随 Windows）");
+                micDevIdx.Add(-1);
+            }
+            else
+            {
+                cmbMic.Items.AddRange(items.ToArray());
+            }
+            SelectMicFromConfig();
+        }
+        finally { voiceLoading = false; }
+        UpdateMicState();
+        if (request) Status("已刷新音频输入设备列表（" + Math.Max(0, micDevIdx.Count - 1) + " 个可用麦克风）");
+    }
+
+    /// <summary>按配置值在下拉里选中 —— 与悬浮球同口径：索引+名字都对 &gt; 按名字 &gt; 按索引。</summary>
+    private void SelectMicFromConfig()
+    {
+        int want = -1;
+        string cfg = Data.AsrInputDevice == null ? "default" : Data.AsrInputDevice;
+        if (cfg != "default")
+        {
+            string[] parts = cfg.Split(new char[] { '|' }, 2);
+            int wi;
+            if (int.TryParse(parts[0], out wi)) want = wi;
+        }
+        int sel = -1;
+        // 优先级必须与 voice-overlay.py 的 resolve_input_device 完全一致，否则
+        // 「设置窗口显示选中的」和「悬浮球实际打开的」可能不是同一个。
+        // 索引+名字都对 -> 用它（最常见）；索引漂了 -> 按名字找；再不行 -> 按索引。
+        // 为什么不能只按名字：同一只实体麦克风在 MME 与 DirectSound 下**同名**出现两次，
+        // 只按名字会永远命中第一条，用户选的 DirectSound 那条会被显示成 MME 那条。
+        if (cfg != "default")
+        {
+            string wantName = MicDisplayName(cfg);
+            for (int i = 0; i < micDevIdx.Count && i < cmbMic.Items.Count; i++)
+            {
+                if (micDevIdx[i] == want && MicDisplayName(cmbMic.Items[i].ToString()) == wantName)
+                { sel = i; break; }
+            }
+            if (sel < 0)
+            {
+                for (int i = 0; i < cmbMic.Items.Count; i++)
+                {
+                    if (MicDisplayName(cmbMic.Items[i].ToString()) == wantName) { sel = i; break; }
+                }
+            }
+        }
+        if (sel < 0)
+        {
+            for (int i = 0; i < micDevIdx.Count; i++)
+            {
+                if (micDevIdx[i] == want) { sel = i; break; }
+            }
+        }
+        if (sel < 0) sel = micDevIdx.Count > 0 ? 0 : -1;
+        cmbMic.SelectedIndex = sel >= 0 ? Math.Min(sel, cmbMic.Items.Count - 1) : -1;
+    }
+
+    private void UpdateMicState()
+    {
+        if (lblMicCur == null) return;
+        string cfg = Data.AsrInputDevice == null ? "default" : Data.AsrInputDevice;
+        int n = Math.Max(0, micDevIdx.Count - 1);
+        if (cfg == "default")
+        {
+            lblMicCur.Text = "当前：跟随系统默认设备" +
+                (n > 0 ? "（本机检测到 " + n + " 个可用麦克风）" : "");
+            lblMicCur.ForeColor = Theme.Green;
+            return;
+        }
+        // 找到了就是下拉里当前选中的那一个；配置的设备被拔掉时 select 会退回第 0 项，
+        // 这时候要明确告诉用户「你选的设备不在了」，否则他会以为设置没保存上。
+        bool found = cmbMic.SelectedIndex >= 0 &&
+                     MicDisplayName(cmbMic.SelectedItem.ToString()) == MicDisplayName(cfg);
+        string name = MicDisplayName(cfg);
+        if (found)
+        {
+            lblMicCur.Text = "当前：" + name;
+            lblMicCur.ForeColor = Theme.Green;
+        }
+        else
+        {
+            lblMicCur.Text = "当前：" + name + " —— 没找到这个设备（可能已拔掉），会自动用系统默认";
+            lblMicCur.ForeColor = Theme.Danger;
+        }
     }
 
     // ---- GPU 探测 ----
@@ -980,6 +1313,133 @@ internal partial class MainForm : Form
         lblCpuCur.ForeColor = gpuOn ? Theme.Tert
                             : n <= 4 ? Theme.Green : n <= 6 ? Theme.Accent : Theme.Danger;
         trkCpu.Enabled = !gpuOn;      // GPU 模式下 CPU 只做前后处理，滑块无意义
+    }
+
+    // ---- 「替换预览」速度 ----
+    // 文本框是人手输入的，可能是 "." / "" / "1.5秒" 这类中间态，统一走这里解析：
+    // 解析不出来返回 -1（调用方直接忽略，别把它夹成下限把用户正在输的值改掉）。
+    // ★ 0 是合法值（立刻替换），所以调用方的判断是 `v < 0` 而不是 `v <= 0`。
+    //
+    // ★ 必须用 NumberStyles.AllowDecimalPoint 而不是 Float：Float 里含
+    //   AllowThousands，用户输入 "1,5"（把逗号当小数点）会被解析成 **15**，
+    //   然后被夹到上限 3.0 —— 一个静默的 3 倍误差。AllowDecimalPoint 会让它解析
+    //   失败、返回 -1，文本框保持原样，用户看得见自己输的是什么。
+    private static double ParsePace(string s)
+    {
+        if (s == null) return -1;
+        s = s.Trim().Replace("秒", "").Trim();
+        double v;
+        if (!double.TryParse(s, NumberStyles.AllowLeadingSign | NumberStyles.AllowDecimalPoint,
+                             CultureInfo.InvariantCulture, out v))
+            return -1;
+        return v;
+    }
+
+    /// <summary>秒 -> 滑块刻度（10 刻度 = 1 秒），并按上下限夹紧。</summary>
+    private static int PaceTick(double secs)
+    {
+        int t = (int)Math.Round(secs * 10, MidpointRounding.AwayFromZero);
+        int lo = (int)Math.Round(Data.ReconcileSecsMin * 10, MidpointRounding.AwayFromZero);
+        int hi = (int)Math.Round(Data.ReconcileSecsMax * 10, MidpointRounding.AwayFromZero);
+        return t < lo ? lo : t > hi ? hi : t;
+    }
+
+    /// <summary>
+    /// 自检：刻度换算与文本解析的边界（`VMenuSettings.exe --pacetest`）。
+    /// 这两处一旦错位，用户输入的秒数就不是实际写入文件的值，
+    /// 而配置文件是 Python 侧唯一的事实来源 —— 错在界面上很难被发现。
+    /// </summary>
+    internal static int RunPaceSelfTest()
+    {
+        int fails = 0;
+        Action<string, bool> chk = delegate(string what, bool ok)
+        {
+            Console.WriteLine((ok ? "  OK   " : "  FAIL ") + what);
+            if (!ok) fails++;
+        };
+
+        // 0.0~3.0 的每一个刻度都必须能来回（含 0 = 立刻替换）
+        for (int t = 0; t <= 30; t++)
+        {
+            double v = t / 10.0;
+            chk("刻度 " + t + " -> " + v.ToString("0.0") + " 秒",
+                PaceTick(v) == t);
+        }
+        chk("0.0 秒 = " + Data.ReconcileSecsMin + " 秒下限（立刻替换）",
+            PaceTick(Data.ReconcileSecsMin) == 0);
+        chk("3.0 秒 = " + Data.ReconcileSecsMax + " 秒上限",
+            PaceTick(Data.ReconcileSecsMax) == 30);
+        chk("默认值 " + Data.DefaultReconcileSecs + " 秒落在刻度 0（立刻替换）",
+            PaceTick(Data.DefaultReconcileSecs) == 0);
+        // 默认必须是「立刻」：默认慢一档 = 每次识别结束白等一秒，正是用户报的
+        // 「时长太长」。快通道已证明 0 秒既最快又一格不丢（不要把它改回 1.0）。
+        chk("默认值是 0.0（立刻替换）",
+            Math.Abs(Data.DefaultReconcileSecs - 0.0) < 1e-9);
+        // 越界夹紧（不能出现滑块值超出 Maximum 导致 ArgumentOutOfRange）
+        chk("0 秒就是下限本身（不再被夹到 0.3）", PaceTick(0) == 0);
+        chk("负数夹到下限", PaceTick(-5) == 0);
+        chk("99 秒夹到上限", PaceTick(99) == 30);
+        // 上下限必须和 voice-overlay.py 的 RECONCILE_SECS_MIN/MAX 一致：
+        // 界面允许写进去的值，Python 侧必须原样认（0.0 尤其关键）
+        chk("下限是 0.0（Python 侧 RECONCILE_SECS_MIN 同步为 0.0）",
+            Math.Abs(Data.ReconcileSecsMin - 0.0) < 1e-9);
+        // 文本解析：正常值、带单位、用逗号做小数点（不变文化口径）、中间态
+        chk("ParsePace(\"1.0\") == 1.0", Math.Abs(ParsePace("1.0") - 1.0) < 1e-9);
+        chk("ParsePace(\"1\") == 1.0", Math.Abs(ParsePace("1") - 1.0) < 1e-9);
+        chk("ParsePace(\" 2.5 \") == 2.5", Math.Abs(ParsePace(" 2.5 ") - 2.5) < 1e-9);
+        chk("ParsePace(\"1.5秒\") == 1.5", Math.Abs(ParsePace("1.5秒") - 1.5) < 1e-9);
+        // 逗号当小数点：绝不能解析成 15（AllowThousands 会，然后被夹到上限）
+        chk("ParsePace(\"1,5\") < 0（逗号不当千分位，否则 15 被夹成 3.0）",
+            ParsePace("1,5") < 0);
+        // "0" / "0." 都要解析成 0，且调用方**不能**把它当中间态丢掉 —— 0 是
+        // 「立刻替换」这个合法取值，丢掉了用户就永远调不到最快。
+        chk("ParsePace(\"0\") == 0（立刻替换，合法）",
+            Math.Abs(ParsePace("0")) < 1e-9);
+        chk("ParsePace(\"0.\") == 0（输入中途也不能被当成非法）",
+            Math.Abs(ParsePace("0.")) < 1e-9);
+        chk("ParsePace(\"0.0\") == 0", Math.Abs(ParsePace("0.0")) < 1e-9);
+        chk("ParsePace(\"0秒\") == 0", Math.Abs(ParsePace("0秒")) < 1e-9);
+        chk("ParsePace(\"\") < 0", ParsePace("") < 0);
+        chk("ParsePace(null) < 0", ParsePace(null) < 0);
+        chk("ParsePace(\"abc\") < 0", ParsePace("abc") < 0);
+        chk("ParsePace(\".\") < 0", ParsePace(".") < 0);
+
+        Console.WriteLine(fails == 0 ? "pacetest OK" : ("pacetest FAILED: " + fails));
+        return fails == 0 ? 0 : 1;
+    }
+
+    private void UpdatePaceState()
+    {
+        if (trkPace == null) return;
+        double v = Data.ReconcileSecs;
+        if (v < Data.ReconcileSecsMin) v = Data.ReconcileSecsMin;
+        if (v > Data.ReconcileSecsMax) v = Data.ReconcileSecsMax;
+        int tick = PaceTick(v);
+        voiceLoading = true;                  // 回填控件时别触发保存
+        try
+        {
+            if (trkPace.Value != tick) trkPace.Value = tick;
+            txtPace.Text = v.ToString("0.0");
+            if (chkFast != null) chkFast.Checked = Data.FastDelete;
+        }
+        finally { voiceLoading = false; }
+
+        // 说清楚这个秒数「是什么」。有了快速替换，秒数**真的说了算**：
+        // 快通道没有每格下限，0.0 就是「立刻替换」；关掉快速替换才会退回
+        // 真实键盘注入（那时每格 >= 24ms，长句子会顶长）。
+        string extra;
+        if (v <= 0.0)
+            extra = " —— 立刻替换（不铺时长，最快）";
+        else if (!Data.FastDelete)
+            extra = " —— 真实键盘注入：每格不低于 24 毫秒，长句子会比这个时长更久";
+        else
+            extra = " —— 这个时长内匀速退完，不随句子长短变化（0 秒 = 立刻替换）";
+        lblPaceCur.Text = "当前：" + v.ToString("0.0") + " 秒"
+            + (Math.Abs(v - Data.DefaultReconcileSecs) < 0.001 ? "（默认）" : "")
+            + extra;
+        // 0（立刻替换）是默认的推荐值，标绿；只有关掉快速替换、退回真实键盘注入
+        // （那时每格 >= 24ms，长句子会被下限顶长）才提示注意。
+        lblPaceCur.ForeColor = Data.FastDelete ? Theme.Green : Theme.Accent;
     }
 
     // ---- 悬浮球进程：查询 / 重启 ----
@@ -1182,6 +1642,22 @@ internal partial class MainForm : Form
                 trkCpu.Value = Math.Min(Math.Max(1, Data.AsrThreads), mx);
                 UpdateCpuState();
             }
+            if (trkPace != null) UpdatePaceState();
+            if (cmbMic != null)
+            {
+                // 列表只在第一次填（重读文件没必要），但**每次都要按配置重新选一遍**：
+                // 这个函数在窗口每次显示时都会跑（ShowSettingsWindow），而配置可能被
+                // 别处改过（例如悬浮球重启、手改 txt）。不重选的话下拉会停在上一次
+                // 的选中项，用户看到的和实际生效的不是一回事。
+                if (cmbMic.Items.Count == 0) RefreshMicList(false);
+                else
+                {
+                    voiceLoading = true;
+                    try { SelectMicFromConfig(); }
+                    finally { voiceLoading = false; }
+                    UpdateMicState();
+                }
+            }
         }
         finally { voiceLoading = false; }
         UpdateOverlayState();
@@ -1196,7 +1672,7 @@ internal partial class MainForm : Form
     // ================================================================ 防误触
     private void BuildMiCard()
     {
-        cardMi = new AppleCard("防误触（间隔太短的连续按键自动吞掉）", Theme.Bg, 12);
+        cardMi = new AppleCard("防误触（间隔太短的连续按键自动吞掉）", Theme.Bg, Theme.RadiusCard);
 
         chkMiEnable = new CheckBox();
         chkMiEnable.Text = "启用防误触";
@@ -1401,14 +1877,33 @@ internal partial class MainForm : Form
         trkCpu.SetBounds(16, 34, cwv - 32, 34);
         lblCpuCur.SetBounds(18, 72, cwv - 36, 22);
         lblCpuHint.SetBounds(18, 96, cwv - 36, 96);
+        // 替换预览速度卡片：滑块一行 + 秒数框一行 + 状态一行 + 快速替换勾选一行
+        // + 说明四行（秒数框和范围文字跟滑块同一行；说明按本机 150% 缩放折行给足 88px）
+        cardPace.SetBounds(16, 626, cwv, 244);
+        trkPace.SetBounds(16, 34, Math.Max(200, cwv - 460), 34);
+        txtPaceP.SetBounds(Math.Max(240, cwv - 430), 36, 74, 30);
+        lblPaceRange.SetBounds(Math.Max(324, cwv - 346), 42, 260, 22);
+        btnPaceReset.SetBounds(Math.Max(324, cwv - 156), 38, 130, 30);
+        lblPaceCur.SetBounds(18, 78, cwv - 36, 22);
+        chkFast.Location = new Point(18, 104);
+        lblPaceHint.SetBounds(18, 134, cwv - 36, 88);
+        // 麦克风卡片：下拉一行 + 状态一行 + 说明三行
+        // 说明框给 74px 而不是按 3 行×17px 算出来的 52px —— 本机显示缩放 150%，中文
+        // 每行都会折成两行，按行数给高度一定会被裁掉（同页「悬浮球」卡片的说明也是
+        // 3 行、同样给 74px）。
+        cardMic.SetBounds(16, 882, cwv, 178);
+        cmbMicP.SetBounds(18, 34, 360, 30);
+        btnMicRefresh.SetBounds(390, 34, 120, 30);
+        lblMicCur.SetBounds(18, 74, cwv - 36, 22);
+        lblMicHint.SetBounds(18, 100, cwv - 36, 74);
         // 悬浮球卡片：状态一行 + 两个按钮一行 + 说明三行
-        cardOverlay.SetBounds(16, 630, cwv, 194);
+        cardOverlay.SetBounds(16, 1072, cwv, 194);
         lblOvState.SetBounds(18, 36, cwv - 36, 22);
         btnOvRestart.SetBounds(18, 64, 210, 38);
         btnOvRefresh.SetBounds(238, 64, 110, 38);
         lblOvHint.SetBounds(18, 112, cwv - 36, 74);
         // 快捷键卡片：按钮一行 + 状态一行 + 说明三行
-        cardHotkey.SetBounds(16, 840, cwv, 196);
+        cardHotkey.SetBounds(16, 1278, cwv, 196);
         lblHotCur.SetBounds(18, 42, 130, 24);
         btnHotkey.SetBounds(150, 32, 330, 40);
         btnHotReset.SetBounds(494, 35, 140, 34);

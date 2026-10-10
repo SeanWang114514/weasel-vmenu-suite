@@ -8,6 +8,13 @@
 - 按住期间出现第三个键（Ctrl+Win+D 这类系统组合）-> 立即中止，不上屏；
 - 短于 150ms 的误触不响应；录音上限 60 秒。
 
+焦点不在输入框时（桌面 / 资源管理器列表 / 任务栏 / 终端 / 视频播放器…）：
+识别出的文字**无处可去**，这时不注入，改为**兜底复制到剪贴板**，并在悬浮球里
+弹一条「已复制」的胶囊提示（`TOAST_TEXT` / `TOAST_MS`）。判定规则表在
+`voice_overlay_focus.py`（纯函数，`--selftest` 与 `tmp/test-focus-target.py`
+跑的是同一份；实测依据见 `tmp/probe-focus.py`）。判不出来时按老行为注入 ——
+宁可偶尔打空，也不凭空把用户的输入改成复制。
+
 设计要点（安全第一）：
 - 完全独立的 pythonw 进程。输入法（WeaselServer / Lua / YAML）零改动，
   本进程哪怕立刻崩溃也不影响输入法的任何功能。
@@ -18,7 +25,8 @@
 - 录音 sounddevice 16k 单声道；识别优先走 **Qwen3-ASR**（本机 llama-server 常驻
   HTTP，`/v1/audio/transcriptions`），失败自动降级 vosk（D:\\vosk-model-cn，
   vosk C++ API 不支持非 ASCII 路径）；上屏用 SendInput(KEYEVENTF_UNICODE)
-  直接向目标窗口注入字符，**完全不碰剪贴板**；上屏前会先等 Ctrl/Win 全部
+  直接向目标窗口注入字符，**正常路径完全不碰剪贴板**（只有「焦点不在输入框」
+  和「注入没落地」这两个兜底分支才写剪贴板）；上屏前会先等 Ctrl/Win 全部
   松开，避免把修饰键状态带进目标程序。
 - 胶囊窗口 WS_EX_NOACTIVATE：显示期间不抢焦点，光标始终留在你的输入框。
 
@@ -26,6 +34,9 @@
   后台常驻        : pythonw voice-overlay.py
   热键状态机自检  : python  voice-overlay.py --selftest
   完整模拟一轮    : python  voice-overlay.py --simulate  （不真正上屏）
+  看焦点判定      : python  voice-overlay.py --probe-focus  （前台窗口算不算输入框）
+  看「已复制」提示: python  voice-overlay.py --toast        （弹出提示，2.6s 后退出）
+  验剪贴板通路    : python  voice-overlay.py --copy-text "测试"（写入并读回校验）
 """
 import ctypes
 import ctypes.wintypes as wt
@@ -50,12 +61,31 @@ except Exception:                     # pragma: no cover - 环境相关
     vosk = None
     VOSK_OK = False
 import tkinter as tk
+import tkinter.font as tkfont
 
 try:                                  # 抗锯齿渲染要靠 Pillow；缺失则退回 Tk 画布
     from PIL import Image, ImageDraw, ImageFilter
     PIL_OK = True
 except Exception:                     # pragma: no cover - 环境相关
     PIL_OK = False
+
+try:                                  # 焦点判定规则表（纯逻辑，单独成文件好回归）
+    from voice_overlay_focus import (judge_focus_target, make_guithreadinfo,
+                                     wants_copy, FOCUS_EDIT, FOCUS_NONEDIT,
+                                     FOCUS_UNKNOWN)
+    FOCUS_OK = True
+except Exception:                     # pragma: no cover - 环境相关
+    judge_focus_target = make_guithreadinfo = None
+    wants_copy = None
+    FOCUS_EDIT, FOCUS_NONEDIT, FOCUS_UNKNOWN = "edit", "nonedit", "unknown"
+    FOCUS_OK = False
+
+try:                                  # UIA：直接问系统「焦点元素能不能收文字」
+    import voice_overlay_uia as _uia
+    UIA_OK = True
+except Exception:                     # pragma: no cover - 环境相关
+    _uia = None
+    UIA_OK = False
 
 # 打包成 exe（PyInstaller）后 __file__ 指向解包临时目录，用 exe 所在目录
 if getattr(sys, "frozen", False):
@@ -125,6 +155,202 @@ STREAM_MIN_DELTA = 1                     # 增量至少这么多字符才值得�
 STREAM_TAIL_RATIO = 0.08                 # 长音频降频：间隔 = max(0.4, 0.08*时长)
 STREAM_INTERVAL_MAX = 1.0                # 降频后的间隔上限（秒）
 ABORT_RETRACT_WAIT = 10.0                # abort 撤回时等修饰键松开的上限（秒）
+
+# ---- 退格投递节奏（实测出来的硬参数，别随手调小）----
+# 实测（真实双进程：独立注入进程 -> 独立目标进程，目标自己跑消息循环；
+# 12 次退格 / 每次重复 3 轮，统计目标**实际收到的退格次数**）：
+#   SendInput 一次投 n 组 down/up（旧实现）      -> 收到 5~7 / 12
+#   SendInput 逐个 + scan code + 12ms 间隔        -> 收到 7~8 / 12
+#   keybd_event 无间隔                            -> 收到 5~7 / 12
+#   keybd_event 按住 12ms、释放后再等 12ms        -> 收到 12 / 12（24 次也是 24/24）
+# 结论：**只有 keybd_event + 每键 24ms 才能收全**。少一半的退格会静默丢失，
+# 屏幕上就是「流式预览的前半句没被删掉、最终结果只能接在后面」——这正是
+# 用户报的「第一个标点前那句一直保留」。退格丢不起，所以这里宁可慢。
+BACKSPACE_HOLD = 0.012                   # 每个退格按住多久（秒）
+BACKSPACE_GAP = 0.012                    # 释放后到下个退格之间的间隔（秒）
+VK_BACK = 0x08                           # 退格键的虚拟键码
+
+# ---- 「替换预览」时长：整段退格 + 补发正文，固定在这个时间内跑完（秒）----
+# 需求（0.2.38）：「增加语音识别出结果后替换预览的速度，要求恒定速度，默认 1s」。
+# 需求（0.2.39，本轮）：「我要的是调快替换的时间，我不是要取消部分的替换」
+#   —— 也就是：该删的一个字都不能少，但这段墙钟必须真的能调快。
+# 恒定 = 不随句子长短变：短句不再一闪而过、长句不再拖到一两秒。
+#
+# 两条投递通道（本轮新增快通道，慢通道降级为兜底）：
+#
+#   快通道 post_backspaces()：把 WM_KEYDOWN/WM_KEYUP(VK_BACK) **直接投给目标的
+#     焦点窗口**。消息进的是目标线程的**消息队列**（FIFO），不过 RIT 的按键状态机，
+#     所以没有「down/up 挤在同一瞬间被合并掉」的丢键问题 —— 实测 46 格
+#     1~10ms、收全 46/46（Tk 目标 / 记事本 RichEditD2DPT / Chrome 顶层自绘窗口
+#     三种真机都过，见 tmp/bs-bulk-delete-experiment.py、tmp/bs-fast-live.py）。
+#     关键：它**没有每格下限**，所以秒数调多快就真的多快；0 秒 = 一口气投完（≈几毫秒）。
+#
+#   慢通道 send_backspaces_slow()：真实键盘注入（keybd_event）。全系统通用，
+#     但每格至少 BACKSPACE_FLOOR = 24ms（RIT 会合并 down/up，实测低于 24ms 静默
+#     丢键，屏幕上直接残留错字）。只有在拿不到焦点窗口、目标类名在黑名单里
+#     （UWP / XAML 岛这类输入走 CoreWindow 输入源、不吃投递键消息的），
+#     或用户在 voice-settings.txt 里关掉 fast_delete 时才走它。
+#
+# 上限 RECONCILE_SECS_MAX 不是拍脑袋：60 个字以内都能在 1s 内退完，
+# 再长就该「快点做完」而不是继续变慢。
+#
+# 默认值 = 0.0（立刻替换）：快通道没有每格下限，一口气投完（实测 1~3ms）且
+# **一格都不丢**（WinForms Edit / Chrome 两种真机逐字一致，见 tmp/bs-fast-e2e.py、
+# tmp/bs-chrome-e2e.py），所以「最快」和「最完整」在同一边 —— 不用二选一。
+# 这正是 0.2.39 的落点：默认就快，一个字都不会少删；想让人看清这段节奏的
+# 再往上调（0.1~3.0 秒铺开），调大只影响快慢，不影响删多少。
+RECONCILE_SECS_DEFAULT = 0.0             # voice-settings.txt 里的 reconcile_secs=
+RECONCILE_SECS_MIN = 0.0                 # 0 = 不铺时长，一口气投完（快通道没有下限）
+RECONCILE_SECS_MAX = 3.0
+
+
+def _backspace_scan():
+    """退格键的真实 scan code（0x0E）。
+
+    wScan=0 时目标程序可能认不出这是退格键（Tk 这类按 scan code 解键名的
+    框架会直接丢掉按键），所以必须带上。取不到时退回 PS/2 标准的 0x0E。
+    """
+    try:
+        u = ctypes.windll.user32
+        u.MapVirtualKeyW.argtypes = [ctypes.c_uint, ctypes.c_uint]
+        u.MapVirtualKeyW.restype = ctypes.c_uint
+        sc = u.MapVirtualKeyW(VK_BACK, 0)     # MAPVK_VK_TO_VSC
+        return sc or 0x0E
+    except Exception:
+        return 0x0E
+
+
+BACKSPACE_SCAN = _backspace_scan()
+BACKSPACE_FLOOR = BACKSPACE_HOLD + BACKSPACE_GAP     # 每格可靠投递下限（秒）
+# 每格的**固定开销**（与 sleep 无关的那部分）。实测：keybd_event 一轮退格的墙钟
+# 总是比 hold+gap 多约 9ms/格，且 SendInput 也一样（standalone 调 SendInput 只要
+# 0.01ms，所以这不是 API 的开销）—— 是注入要交给前台线程的 RIT 去派发，
+# 目标越忙这一格就越贵（我们的测试目标是最慢的 Tk Text，属保守口径）。
+# 算节奏时必须把它减掉，否则「预算 1s」实际会跑成 1.1s。
+BACKSPACE_OVERHEAD = 0.009
+
+
+def backspace_pace(n, budget=RECONCILE_SECS_DEFAULT):
+    """把 n 个退格**匀速铺满** budget 秒，返回 `(hold, gap)`（单位秒）。
+
+    纯函数：selftest 与回归测试测的就是实机用的这一份。
+
+    规则：
+      - n<=0 -> (0, 0)，调用方不该发任何键；
+      - 每格可用时间 = `budget/n - BACKSPACE_OVERHEAD`（扣掉固定开销，
+        这样**墙钟总时长**才真的落在 budget 上，而不是 budget 再多个零头）；
+      - 但每格 sleep 不得低于可靠投递下限 `BACKSPACE_FLOOR`（24ms）——
+        低于它就会静默丢退格，屏幕上残留错字（这个用户可见性远大于快慢）；
+      - 拖到下限就按下限走：n 大时总时长被下限顶长（46 格 ≈1.5s），
+        但**永远不再随句子变长而无限变慢**，这就是「恒定速度」。
+
+    举例（默认 1s，含 9ms 开销）：12 格 -> 每格 74ms、墙钟 ≈1.0s；
+                                 24 格 -> 每格 33ms、墙钟 ≈1.0s；
+                                 46 格 -> 每格 24ms（下限）、墙钟 ≈1.5s。
+    """
+    if n <= 0:
+        return (0.0, 0.0)
+    try:
+        budget = float(budget)
+    except (TypeError, ValueError):
+        budget = RECONCILE_SECS_DEFAULT
+    per = budget / n - BACKSPACE_OVERHEAD
+    if per < BACKSPACE_FLOOR:
+        per = BACKSPACE_FLOOR
+    # 按住 : 间隔 保持与实测可靠的那组同比例（12ms : 12ms）
+    hold = per * (BACKSPACE_HOLD / BACKSPACE_FLOOR)
+    return (hold, per - hold)
+
+
+def parse_reconcile_secs(raw):
+    """`reconcile_secs=` 的原始值 -> 秒数（**纯函数**）。
+
+    只认 0.0 ~ 3.0：**0 表示「不铺时长，一口气投完」**（快通道没有每格下限，
+    见 post_backspaces）；越界/非数字一律退回默认（默认就是 0 = 立刻）——
+    配置文件被人手改坏，不能把节奏搞崩。
+    """
+    if raw is None:
+        return RECONCILE_SECS_DEFAULT
+    try:
+        v = float(raw)
+    except (TypeError, ValueError):
+        return RECONCILE_SECS_DEFAULT
+    if RECONCILE_SECS_MIN <= v <= RECONCILE_SECS_MAX:
+        return v
+    return RECONCILE_SECS_DEFAULT
+
+
+def reconcile_secs():
+    """读 voice-settings.txt 的 reconcile_secs=；缺失/非法/越界退回默认 1s。
+
+    要求：0.0 ~ 3.0 秒（0 = 立刻投完，见 RECONCILE_SECS_MIN/MAX 的说明）。
+    **每次替换前都读一次**，所以设置窗口改完下一次识别即生效，不用重启悬浮球。
+    """
+    return parse_reconcile_secs(_voice_setting("reconcile_secs"))
+
+
+# ---- 快通道：把退格**直接投给目标的焦点窗口**（原理见上面 159 行起的说明）----
+FAST_DELETE_DEFAULT = True               # voice-settings.txt 里的 fast_delete=
+WM_KEYDOWN, WM_KEYUP, WM_NULL = 0x0100, 0x0101, 0x0000
+SMTO_ABORTIFHUNG = 0x0002
+# 已知**不吃**「投递键消息」的窗口类：UWP / XAML 岛的键盘输入走 CoreWindow 输入源，
+# 不是消息循环里的 WM_KEYDOWN。这些目标一律退回慢通道 —— 宁可慢，不许留错字。
+FAST_DELETE_BLOCK_CLASSES = (
+    "windows.ui.core.corewindow", "corewindow",
+    "xamlislandwindow", "xamlislandwindowclass", "applicationframehost",
+    "microsoft.ui.content.desktopchildsitebridge",
+    "winuidesktopwin32windowclass",
+    "windows.ui.composition.desktopwindowcontentbridge",
+)
+# 运行期学到的黑名单：某个窗口类**整段一个键都没投出去**（PostMessage 返回 FALSE，
+# 典型是 UIPI 拦了：目标进程比我们权限高）就记在这里，本次会话内不再白试。
+# 只记「一个都没投出去」——投出去一半的那种不能算，那说明通道本身是通的。
+_FAST_BAD_CLASSES = set()
+
+
+def fast_delete_enabled():
+    """读 fast_delete 开关；缺失/非法默认开（快通道是本次需求的默认行为）。"""
+    val = _voice_setting("fast_delete")
+    if val is None:
+        return FAST_DELETE_DEFAULT
+    return val.strip().lower() in ("1", "true", "on", "yes")
+
+
+def fast_delete_class_ok(cls):
+    """这个焦点窗口类能不能走快通道（**纯函数**）。"""
+    return (cls or "").strip().lower() not in FAST_DELETE_BLOCK_CLASSES
+
+
+def fast_delete_pace(n, budget=RECONCILE_SECS_DEFAULT):
+    """快通道每格铺多少秒（**纯函数**）。
+
+    和慢通道的 `backspace_pace()` 最大的区别：**没有下限**。投递走的是目标线程的
+    消息队列（FIFO、不丢），不需要给 RIT 留「把 up 处理完」的时间，所以 0 也行：
+    0 = 一口气投完（实测 46 格 1ms），1s = 每格 1/n 秒、总时长仍落在预算上。
+    """
+    if n <= 0:
+        return 0.0
+    try:
+        b = float(budget)
+    except (TypeError, ValueError):
+        b = RECONCILE_SECS_DEFAULT
+    if b < 0:
+        b = 0.0
+    return b / n
+
+
+def fast_delete_lparam(scan, up=False):
+    """WM_KEYDOWN/WM_KEYUP 的 lParam（**纯函数**）。
+
+    位段：0-15 重复次数=1、16-23 scan code、24 扩展键、29 上下文、
+    30 前次按键状态、31 转换状态（1 = 松开）。必须带真 scan code —— 按 scan code
+    认键名的框架（Tk 这类）拿不到会把按键直接丢掉。
+    """
+    lp = 1 | (scan << 16)
+    if up:
+        lp |= (1 << 30) | (1 << 31)
+    return lp
+
 
 # ---- 标点转空格开关（设置窗口「设置与缓存」页可切换，改完下一次识别即生效）----
 # 独立于 vmenu-settings.txt：输入法端 lua 会整文件重写 vmenu-settings.txt，
@@ -284,6 +510,145 @@ def asr_threads():
     return ASR_THREADS_DEFAULT
 
 
+# ---- 音频输入设备（麦克风）----
+# 需求：「给语音输入增加切换音频输入设备的功能」。
+# 值 = sounddevice 的设备索引字符串（"3"），或 "default"（系统默认，老行为）。
+# **必须按名字解析而不是死认索引**：设备索引会随插拔 USB 麦 / 开关蓝牙耳机
+# 而变化，写死索引下次开机就指到别的设备上了。写入时存「索引|名字」的完整
+# 形式，读取时先按名字在当前设备表里找，找不到才退回索引、再退回默认。
+ASR_INPUT_DEVICE_DEFAULT = "default"
+
+
+def _voice_setting(key):
+    """读 voice-settings.txt 里某一行的原始值；没有/读不到返回 None。"""
+    try:
+        with open(VOICE_SET_PATH, encoding="utf-8") as f:
+            for line in f:
+                if line.strip().startswith(key):
+                    return line.split("=", 1)[1].strip()
+    except OSError:
+        pass
+    return None
+
+
+def input_device_names():
+    """当前所有**能用**的输入设备的 (索引, 名字) 列表；失败返回空表。
+
+    两道过滤，缺一不可（本机实测 23 个输入设备里只有 10 个真能用）：
+
+    1) `max_input_channels > 0` —— 输出设备（扬声器）混在 sd.query_devices() 里，
+       让用户选到扬声器只会得到「打不开麦克风」。
+
+    2) **只保留 MME / DirectSound 两个 hostapi**。同一只实体麦克风在 4 个 hostapi
+       下各出现一次，本机全量实测（16k 单声道，正是我们录音的参数）：
+         MME(0) 5/5 能开、DirectSound(1) 5/5 能开、
+         WASAPI(2) 0/4 能开、WDM-KS(3) 0/9 能开。
+       WASAPI 在 16kHz 直接报 Invalid sample rate，WDM-KS 报 Unanticipated host
+       error。把打不开的设备列给用户 = 他选完还是没声音，只会以为功能坏了。
+       所以宁可只列确定能开的，也不列一堆看着有、点了不响的。
+
+    名字统一压平空白：设备名里可能带换行（蓝牙免手操作的驱动名就带 \r\n），
+    而这个名字要当成一行的值写进配置文件、还要在下次启动时按名字匹配回来，
+    两边必须同口径。
+    """
+    try:
+        devices = sd.query_devices()
+        apis = sd.query_hostapis()
+        usable = set()
+        for i, a in enumerate(apis):
+            # 名字匹配比写死下标稳：不同 PortAudio 构建的 hostapi 顺序可能不同
+            nm = str(a.get("name", ""))
+            if nm in ("MME", "Windows DirectSound"):
+                usable.add(i)
+        if not usable:                     # 极端情况：一个都没有 -> 不限制，别把列表清空
+            usable = set(range(len(apis)))
+        return [(i, " ".join(str(d["name"]).split()))
+                for i, d in enumerate(devices)
+                if d["max_input_channels"] > 0 and d["hostapi"] in usable]
+    except Exception as e:
+        out("query_devices failed: %r" % (e,))
+        return []
+
+
+def resolve_input_device(raw):
+    """把配置值解析成能直接喂给 sd.InputStream 的 device 参数。
+
+    返回 (device, 说明)：device 为 None = 用 sounddevice 默认设备。
+    """
+    if not raw or raw.lower() == "default":
+        return None, "system default"
+    want = raw.split("|", 1)
+    idx = None
+    try:
+        idx = int(want[0])
+    except (TypeError, ValueError):
+        return None, "bad value %r -> default" % (raw,)
+    name = want[1] if len(want) > 1 else ""
+    devs = input_device_names()
+    # 索引和名字都对得上 -> 直接用（最常见：没插拔过设备）。
+    # 必须先做这一步：同一只实体麦克风在 MME 和 DirectSound 下**同名**出现两次，
+    # 只按名字找会永远命中第一条，用户在设置窗口选了 DirectSound 那条也会被
+    # 悄悄换成 MME 那条（都是能用的设备，不会出错，但和界面显示的不一致）。
+    if name:
+        key = " ".join(name.split())
+        for i, n in devs:
+            if i == idx and n == key:
+                return i, "%d %s" % (i, n)
+        # 索引漂了（插拔过）-> 按名字找。同名多条时取第一条，
+        # 反正它们指向同一只麦克风、都能开。
+        for i, n in devs:
+            if n == key:
+                return i, "%d %s (by name)" % (i, n)
+    for i, n in devs:                      # 名字也对不上 -> 只剩索引可试
+        if i == idx:
+            return i, "%d %s (by index)" % (i, n)
+    return None, "device %r not found -> default" % (raw,)
+
+
+def asr_input_device():
+    """读 voice-settings.txt 的 asr_input_device= 并解析（每次录音前都读一次）。
+
+    热切换的关键：不缓存 —— 设置窗口改完写盘，下一次按住说话就换设备。
+    """
+    return resolve_input_device(_voice_setting("asr_input_device"))
+
+
+# 设备清单落盘，给 C# 设置窗口读。
+# 为什么不直接在设置窗口里枚举：设置窗口是纯 .NET，拿不到 sounddevice 的设备表；
+# 而有 sounddevice 的只有悬浮球这个 Python 进程。悬浮球本来就在跑，让它把清单
+# 写成一个文件是最省事也最可靠的做法（不用给设置窗口硬塞一个 Python 依赖）。
+# 设置窗口「刷新设备」时再写一个请求文件，悬浮球看到就重写清单 —— 这样插拔
+# USB 麦之后不用重启悬浮球也能刷出来。
+MIC_LIST_PATH = os.path.join(RIME_DIR, "mic-devices.txt")
+MIC_LIST_REQUEST = os.path.join(RIME_DIR, "mic-devices.refresh")
+
+
+def write_mic_list():
+    """把当前输入设备清单写成 UTF-8 文本（设置窗口读）。
+
+    格式每行 `索引|名字`，第一行固定是 `default|系统默认设备`。
+
+    ★ 绝不要在这里调 sd._terminate() / sd._initialize()：
+      这是 0.4s 一次的心跳回调（见 make_hotkey_reloader）调用的，
+      而 PortAudio 是**进程级**的 —— _terminate() 会把正在录音的 InputStream
+      一起干掉。实测症状：日志 `query_devices failed: PortAudioError('PortAudio
+      not initialized')` + `mic open failed: Error querying device -1`，
+      也就是「按住说话时正好赶上刷新，这一轮录音直接失效」。
+      query_devices() 自己会按需初始化 PortAudio，不需要我们插手。
+    """
+    lines = ["default|系统默认设备（跟随 Windows）"]
+    for i, n in input_device_names():
+        # "|" 是分隔符，名字里也出现就把分隔符换成 "/"，否则解析会错位
+        #（input_device_names 已经把换行等空白压平了）
+        lines.append("%d|%s" % (i, n.replace("|", "/")))
+    try:
+        with open(MIC_LIST_PATH, "w", encoding="utf-8") as f:
+            f.write("\n".join(lines) + "\n")
+        out("mic list written: %d devices" % (len(lines) - 1))
+    except OSError as e:
+        out("mic list write failed: %r" % (e,))
+
+
 def punct_to_space(text):
     """把识别结果里的标点符号全部换成空格（连续空格合并、首尾去掉）。
 
@@ -341,6 +706,71 @@ BAR = "#0A84FF"                           # 声波条外侧（systemBlue 亮调�
 BAR_IN = "#5AC8FA"                        # 声波条内侧（systemTeal）
 TXT = "#FFFFFF"                           # 徽章内图形（始终白色）
 HINT = "#8E8E93"                          # Apple secondary label（备用）
+INK = "#1C1C1E"                           # Apple label（提示文字颜色）
+
+# ---- 「已复制」提示（焦点不在输入框时的兜底反馈）----
+# 提示用**同一个胶囊**显示：徽章换成剪贴板图形，右侧声波条的位置改成文字，
+# 所以不需要另一个窗口、也不会让悬浮球跳位。文字区域就是声波条那块（逻辑
+# 像素 x=46..94，宽 48），「已复制」按 15px 中文正好 45px，放得下。
+TOAST_TEXT = "已复制"                      # 提示文字（--toast 可覆盖）
+TOAST_MS = 1600                           # 提示最短停留（毫秒）
+TOAST_MS_MAX = 5000                       # 复制兜底的上限：字没上屏，必须留够阅读时间
+TOAST_MS_OK_MAX = 2500                    # 已上屏预览的上限：输入框里本来就有，短一点
+TOAST_FONT_SIZES = (15, 14, 13, 12, 11)   # 依次试到放得下为止（逻辑像素）
+
+# ---- 识别结果预览：把识别出来的文字也显示在悬浮球上 ----
+# 只显示「已复制」的话，用户既看不到识别成了什么，也不知道自己说的是否被听懂。
+# 所以识别完把结果本身画在胶囊上：短就原位显示，长就把胶囊**横向撑开**（还是
+# 同一个胶囊、同一个徽章，只是变宽），超过 TEXT_MAX_W 就用省略号截断。
+TEXT_MAX_W = 560.0                        # 胶囊本体的最大宽度（逻辑像素）
+TEXT_PAD_R = 8                            # 文字右侧留白（和 _text 里保持一致）
+
+
+def fit_text(text, max_w, measure):
+    """在 max_w 宽度内放下 text，返回 `(字号, 实际要画的文字)`。
+
+    **纯函数**：宽度由调用方注入的 `measure(size, text) -> 像素宽` 提供，
+    所以单测可以塞一个假的测量函数，不需要真字体、也不需要窗口。
+
+    策略：从最大字号往下试，第一个放得下整段话的字号就赢（字号优先，宁可小
+    一点也不截断）；所有字号都放不下时才用最小字号 + 省略号截断，用二分找出
+    最多能显示几个字。
+    """
+    if not text:
+        return TOAST_FONT_SIZES[0], ""
+    for size in TOAST_FONT_SIZES:
+        if measure(size, text) <= max_w:
+            return size, text
+    size = TOAST_FONT_SIZES[-1]               # 最小字号仍放不下 -> 截断
+    if measure(size, text) <= max_w:
+        return size, text
+    ell = "…"
+    w_ell = measure(size, ell)
+    if w_ell > max_w:
+        return size, ""
+    lo, hi = 0, len(text)
+    while lo < hi:                            # 二分找最多能放几个字
+        mid = (lo + hi + 1) // 2
+        if measure(size, text[:mid]) + w_ell <= max_w:
+            lo = mid
+        else:
+            hi = mid - 1
+    return size, (text[:lo] + ell if lo < len(text) else text)
+
+
+def toast_ms(n, cap=TOAST_MS_MAX):
+    """提示停留时长：按字数放宽（长句子要留够阅读时间），TOAST_MS ~ cap。
+
+    纯函数，单测直接钉住上下界。「已复制」3 个字 -> 还是原来的 1.6s。
+    `cap` 区分两种提示：复制兜底要久（字没上屏，球是唯一的展示），
+    已上屏预览可以短（输入框里本来就有）。
+    """
+    return int(max(TOAST_MS, min(TOAST_MS + (n - 3) * 90, cap)))
+
+# ---- 剪贴板（只在「焦点不在输入框 / 注入没落地」两条兜底路径上用）----
+CF_UNICODETEXT = 13
+GMEM_MOVEABLE = 0x0002
+CLIP_RETRY = 5                            # 剪贴板被别人占着时的退避重试次数
 
 
 _LOG_LOCK = threading.Lock()
@@ -630,13 +1060,24 @@ def hotkey_recording_active():
 
 
 def make_hotkey_reloader(detector):
-    """返回一个每 0.4s 调一次的回调：配置变了就换检测器的键，返回 True 表示换了。"""
+    """返回一个每 0.4s 调一次的回调：配置变了就换检测器的键，返回 True 表示换了。
+
+    顺带服务「设置窗口要设备清单」的请求文件（见 write_mic_list）：放在这里是因为
+    这个回调本来就是 0.4s 一次的心跳，不用额外开线程。
+    """
     try:
         stamp = [os.path.getmtime(VOICE_SET_PATH)]
     except OSError:
         stamp = [0.0]
 
     def reload_if_changed():
+        # 设置窗口点「刷新设备」会写这个请求文件 -> 重写清单并删掉请求
+        if os.path.isfile(MIC_LIST_REQUEST):
+            try:
+                os.remove(MIC_LIST_REQUEST)
+            except OSError:
+                pass
+            write_mic_list()
         try:
             m = os.path.getmtime(VOICE_SET_PATH)
         except OSError:
@@ -973,37 +1414,178 @@ def send_text(text):
     return True
 
 
-def send_backspaces(n):
-    """按 VK_BACK 退格 n 次（用于撤回/校正流式已上屏的文字）。
+def fast_delete_hwnd():
+    """快通道的目标窗口：前台窗口所属线程的**焦点控件**（拿不到/不可信返回 0）。
 
-    安全护栏：Ctrl/Win 还按着时绝不退格——Ctrl+Backspace 在多数编辑器里
-    是“删一个词”，会删掉比我们输入的更多的内容。宁可放弃校正。
+    为什么用焦点子窗口而不是前台窗口本身：记事本这类顶层窗口只说明「这是个
+    记事本」，真正处理按键的是里面的 RichEditD2DPT 子窗口。浏览器 / Electron 把
+    编辑区放在渲染进程里，GetGUIThreadInfo 拿回来的就是顶层窗口本身 —— 两种都
+    实测过能收到投递的 WM_KEYDOWN（Chrome 顶层自绘窗口 46/46）。
+    """
+    if not FOCUS_OK:
+        return 0
+    try:
+        f = focus_facts()
+    except Exception as e:                # pragma: no cover - 环境相关
+        out("fast delete: focus probe failed: %r" % (e,))
+        return 0
+    hwnd = f.get("focus") or f.get("fg") or 0
+    cls = (f.get("focus_cls") or f.get("fg_cls") or "").strip().lower()
+    if not hwnd:
+        return 0
+    if not fast_delete_class_ok(cls):
+        out("fast delete: %r 不吃投递键消息 -> 退回慢通道" % cls)
+        return 0
+    if cls and cls in _FAST_BAD_CLASSES:
+        out("fast delete: %r 本次会话已判定投不出去 -> 退回慢通道" % cls)
+        return 0
+    return hwnd
 
-    性能注记：SendInput 的成本是**每个按键事件约 5ms**（实测 126 个
-    退格 ~0.6s、200 个 ~1.1s），与调用次数无关（分批发不会更快，
-    合成一次调用也不会更快）。所以这里只做一次调用，真正的优化是
-    **少退格**——见 reconcile_plan 的公共前缀裁剪。
+
+def _probe_target_alive(hwnd, timeout_ms=2000):
+    """探活：同步发一条 WM_NULL（不改变目标状态），目标没卡死返回 True。
+
+    ⚠ 它**不是**队列栅栏 —— 跨线程 SendMessage 走的是「已发送消息」优先级，
+    比已投递消息还高，所以它返回时目标**可能还没消费**我们刚投的退格。
+    顺序由系统本身保证：消息优先级是 已发送 > 已投递 > 硬件输入，我们用
+    PostMessage 投退格（已投递）、用 SendInput 补正文（硬件输入），所以退格
+    一定先被消费完。见 tmp/bs-fast-e2e.py 的端到端断言。
+    这里只用来在目标无响应时及时收手（SendMessageTimeout + ABORTIFHUNG）。
+    """
+    u = ctypes.windll.user32
+    u.SendMessageTimeoutW.argtypes = [
+        wt.HWND, ctypes.c_uint, ctypes.c_size_t, ctypes.c_size_t,
+        ctypes.c_uint, ctypes.c_uint, ctypes.POINTER(ctypes.c_size_t)]
+    u.SendMessageTimeoutW.restype = ctypes.c_void_p
+    res = ctypes.c_size_t()
+    ok = u.SendMessageTimeoutW(wt.HWND(hwnd), WM_NULL, 0, 0,
+                               SMTO_ABORTIFHUNG, timeout_ms, ctypes.byref(res))
+    return bool(ok)
+
+
+def post_backspaces(hwnd, n, budget):
+    """快通道：把 n 组 VK_BACK 直接 Post 给目标窗口；返回**真正投出去**的键数。
+
+    为什么是「Post 一对 WM_KEYDOWN+WM_KEYUP」而不是别的形态：这才是**和真实按键
+    完全一样的消息序列** —— 目标的消息循环照旧 TranslateMessage 把它翻成
+    WM_CHAR(8)，编辑控件照旧按 WM_CHAR 删字。所以它对「按 WM_CHAR 删字的
+    标准 Edit/RichEdit」和「自己处理 WM_KEYDOWN 的 Chromium/Electron/Tk」
+    两类目标**同时**有效。实测：
+      * 只 Post WM_CHAR(8)  -> 浏览器/Electron 一类不认（它们只看 WM_KEYDOWN）；
+      * 只 SendMessage(WM_KEYDOWN) -> 标准 Edit/RichEdit 不认（它们靠
+        TranslateMessage 生成的 WM_CHAR 删字，同步投递根本不经过消息循环）。
+    区别只在于**谁在等**：真实按键要排队等 RIT 派发，投递直接进目标队列，
+    所以没有「down/up 挤在一起被合并掉」的丢键问题，也就没有 24ms 的每格下限。
+
+    返回值语义（调用方据此决定怎么补）：
+      * `n`     全部投出；
+      * `0`     一个都没投出去（被 UIPI 拦了 / 窗口已销毁）-> 调用方整段退回慢通道；
+      * `0<k<n` 投到第 k 个被拒（队列配额耗尽之类）-> 调用方用慢通道补 `n-k` 个，
+                总数不变。**绝不能拿 n 去补** —— 已经投出去的那 k 个照样会生效，
+                再补 n 个就多删 k 个字，吃掉用户自己的文字。
+    """
+    u = ctypes.windll.user32
+    u.PostMessageW.argtypes = [wt.HWND, ctypes.c_uint, ctypes.c_size_t,
+                               ctypes.c_size_t]
+    u.PostMessageW.restype = ctypes.c_bool
+    per = fast_delete_pace(n, budget)
+    t0 = time.time()
+    posted = 0
+    for i in range(n):
+        if not u.PostMessageW(wt.HWND(hwnd), WM_KEYDOWN, VK_BACK,
+                              fast_delete_lparam(BACKSPACE_SCAN)):
+            out("fast delete: PostMessage(WM_KEYDOWN) rejected at %d/%d" % (i, n))
+            break
+        if not u.PostMessageW(wt.HWND(hwnd), WM_KEYUP, VK_BACK,
+                              fast_delete_lparam(BACKSPACE_SCAN, True)):
+            out("fast delete: PostMessage(WM_KEYUP) rejected at %d/%d" % (i, n))
+            break
+        posted += 1
+        if per and i < n - 1:
+            time.sleep(per)
+    dt = (time.time() - t0) * 1000
+    if posted:
+        alive = _probe_target_alive(hwnd)
+        out("fast delete: %d/%d chars -> %s in %.0fms (%.2fms/键, budget %.1fs)%s"
+            % (n, posted, window_class(hwnd) or hex(int(hwnd)), dt,
+               dt / max(1, posted), budget,
+               "" if alive else " [target unresponsive]"))
+    else:
+        # 整段投不出去：把这个窗口类记下来，本次会话内不再白试一遍
+        cls = (window_class(hwnd) or "").strip().lower()
+        if cls:
+            _FAST_BAD_CLASSES.add(cls)
+        out("fast delete: 一个都没投出去 (%s) -> 退回慢通道"
+            % (window_class(hwnd) or hex(int(hwnd))))
+    return posted
+
+
+def send_backspaces(n, budget=None):
+    """退格 n 次（撤回/校正流式已上屏的文字）；全部投出返回 True。
+
+    两条通道，优先快通道（原理与实测见上面 173 行起的说明）：
+      * 快通道 `post_backspaces()`：把键消息**直接投给目标的焦点窗口**，没有每格
+        下限 —— 「调多快就真的多快」，0 秒 = 一口气投完（46 格实测 1~10ms、
+        收全 46/46，Tk / 记事本 / Chrome 三种真机都验过）；
+      * 慢通道 `send_backspaces_slow()`：真实键盘注入，全系统通用，但每格 >= 24ms。
+        只在拿不到焦点窗口 / 目标类名在黑名单 / 用户关掉 fast_delete 时用。
+
+    budget 为 None 时现读配置（改完设置下一次识别即生效）。
+    安全护栏：Ctrl/Win 还按着时绝不退格——Ctrl+Backspace 在多数编辑器里是
+    「删一个词」，会删掉比我们输入的更多的内容。宁可放弃校正。
     """
     if n <= 0:
         return True
     if any(_key_down(vk) for vk in CTRL_VKS + WIN_VKS):
         out("backspace skipped: modifiers still held (n=%d)" % n)
         return False
+    budget = reconcile_secs() if budget is None else budget
+    if fast_delete_enabled():
+        hwnd = fast_delete_hwnd()
+        if hwnd:
+            posted = post_backspaces(hwnd, n, budget)
+            if posted >= n:
+                return True
+            if posted > 0:
+                # 投了一半：剩下的用慢通道补齐，**总数还是 n**（多补会吃掉用户文字）
+                return send_backspaces_slow(n - posted, 0.0)
+            # 一个都没投出去 -> 整段退回慢通道
+    return send_backspaces_slow(n, budget)
+
+
+def send_backspaces_slow(n, budget=RECONCILE_SECS_DEFAULT):
+    """慢通道（兜底）：真实键盘注入 keybd_event，每格 >= 24ms。
+
+    ⚠ 为什么不用 SendInput：实测过，**会静默丢一半**。
+    退格必须真的落到位，否则屏幕上会残留流式预览的前半句（最终结果只能
+    接在它后面），表现就是「第一个标点前那句话一直保留、没被覆盖」。
+    实测（独立注入进程 -> 独立目标进程，12 次退格 × 3 轮）：
+        SendInput 一次投 n 组 down/up（旧实现） -> 目标只收到 5~7 / 12
+        SendInput 逐个 + scan code + 12ms 间隔   -> 7~8 / 12
+        keybd_event 无间隔                       -> 5~7 / 12
+        keybd_event 按住 12ms + 释放后 12ms      -> 12 / 12（n=24 也 24/24）
+    所以这里走 keybd_event，并**带真实 scan code**（wScan=0 时目标可能认不出
+    这是退格键）。慢是慢，但退格丢一格就是用户看得见的错字。
+    性能注记：keybd_event 每次调用本身约 9ms（一轮退格 2 次调用 ≈ 18ms 固定
+    开销），所以每格的实际墙钟比 hold+gap 略长；真正的优化仍然是**少退格**——
+    见 reconcile_plan 的公共前缀裁剪。
+    """
+    hold, gap = backspace_pace(n, budget)
     user32 = ctypes.windll.user32
-    user32.SendInput.argtypes = [ctypes.c_uint, ctypes.POINTER(INPUT),
-                                 ctypes.c_int]
-    user32.SendInput.restype = ctypes.c_uint
-    arr = (INPUT * (n * 2))()
-    for i in range(n):
-        arr[2 * i].type = INPUT_KEYBOARD
-        arr[2 * i].ki.wVk = 0x08                    # VK_BACK
-        arr[2 * i + 1].type = INPUT_KEYBOARD
-        arr[2 * i + 1].ki.wVk = 0x08
-        arr[2 * i + 1].ki.dwFlags = KEYEVENTF_KEYUP
-    sent = user32.SendInput(n * 2, arr, ctypes.sizeof(INPUT))
-    if sent != n * 2:
-        out("SendInput backspace partial: %d/%d" % (sent, n * 2))
-        return False
+    user32.keybd_event.argtypes = [ctypes.c_ubyte, ctypes.c_ubyte,
+                                   ctypes.c_uint, ctypes.c_void_p]
+    user32.keybd_event.restype = None
+    t0 = time.time()
+    for _ in range(n):
+        user32.keybd_event(VK_BACK, BACKSPACE_SCAN, 0, None)
+        if hold:
+            time.sleep(hold)
+        user32.keybd_event(VK_BACK, BACKSPACE_SCAN, KEYEVENTF_KEYUP, None)
+        if gap:
+            time.sleep(gap)
+    dt = (time.time() - t0) * 1000
+    out("slow delete: %d chars in %.0fms (%.0fms/键, budget %.1fs)"
+        % (n, dt, dt / max(1, n), budget))
     return True
 
 
@@ -1081,12 +1663,12 @@ def reconcile_plan(text, emitted):
     - `rewrite`  从头就不一致 -> 调用方先退格 len(emitted) 再发 text
     - `keep_all` 最终为空但流式有字 -> 保留已上屏，一个字都不删
 
-    `trim` 为什么重要：SendInput 的成本是**每个按键约 5ms**，退格数直接
-    等于「删除预览 → 插入正文」那段卡顿的时长。旧逻辑只要有一处不一致就
-    整段重打（2n 个事件），长句子会明显卡；改成公共前缀裁剪后，只需删掉
-    **真正变了的那几个字**，删除耗时不再随整句长度增长——这正是
-    「删除时间不随长度变化」的落点。事件数 (n-p)+(m-p) 恒 <= n+m，
-    所以 trim 永远不比重写慢，且结果完全等价。
+    `trim` 为什么重要：退格数直接等于「删除预览」那段的长度，而每个退格
+    都必须按可靠投递的节奏发（见 backspace_pace）。旧逻辑只要有一处不一致
+    就整段重打，长句子会明显卡；改成公共前缀裁剪后，只需删掉**真正变了的
+    那几个字**，删除耗时不再随整句长度增长——这正是「删除时间不随长度变化」
+    的落点。事件数 (n-p)+(m-p) 恒 <= n+m，所以 trim 永远不比重写慢，
+    且结果完全等价。
 
     安全性依据：退格数必须**恰好**等于「已上屏里要抹掉的那一截」——
     每一步流入的字都记在 emitted 里，多退一格会吃掉用户原有文字，
@@ -1115,6 +1697,193 @@ def get_foreground_hwnd():
     u.GetForegroundWindow.argtypes = []
     u.GetForegroundWindow.restype = ctypes.c_void_p
     return u.GetForegroundWindow()
+
+
+# --------------------------------------------- 焦点目标：在不在一个「输入框」里
+# 需求：识别出结果后，如果焦点**不在可输入的控件里**（桌面、资源管理器列表、
+# 任务栏、终端、播放器…），注入的字哪儿都去不了，等于白说一遍。这时改为把文字
+# 复制进剪贴板，并在悬浮球里弹一条「已复制」。
+#
+# 判定只做「有没有正向证据」这一件事：规则表在 voice_overlay_focus.py（纯函数，
+# 有实机实测依据与回归用例），这里只负责把 Win32 的现场取出来喂给它。
+def window_class(hwnd):
+    """窗口类名；取不到返回 ""（空串表示「不知道」，不参与负判）。"""
+    if not hwnd:
+        return ""
+    u = ctypes.windll.user32
+    u.GetClassNameW.argtypes = [wt.HWND, wt.LPWSTR, ctypes.c_int]
+    u.GetClassNameW.restype = ctypes.c_int
+    buf = ctypes.create_unicode_buffer(256)
+    if not u.GetClassNameW(wt.HWND(hwnd), buf, 256):
+        return ""
+    return buf.value
+
+
+def focus_facts():
+    """取一次焦点现场：前台窗口类名 + 焦点控件类名 + caret（caret 只进日志）。
+
+    为什么不用 GetForegroundWindow 的类名就够：记事本这类顶层窗口只说明「这是个
+    记事本」，真正能接收文字的是它里面的 Edit/RichEdit 子窗口，所以必须走
+    GetGUIThreadInfo 拿前台线程的**焦点控件**。
+    """
+    fg = int(get_foreground_hwnd() or 0)
+    f = {"fg": fg, "fg_cls": window_class(fg), "focus": 0, "focus_cls": "",
+         "caret": 0}
+    if not fg or not FOCUS_OK:
+        return f
+    u = ctypes.windll.user32
+    u.GetWindowThreadProcessId.argtypes = [wt.HWND, ctypes.POINTER(wt.DWORD)]
+    u.GetWindowThreadProcessId.restype = wt.DWORD
+    tid = u.GetWindowThreadProcessId(wt.HWND(fg), None)
+    if not tid:
+        return f
+    gti = make_guithreadinfo()
+    gti.cbSize = ctypes.sizeof(gti)
+    u.GetGUIThreadInfo.argtypes = [wt.DWORD, ctypes.POINTER(type(gti))]
+    u.GetGUIThreadInfo.restype = ctypes.c_bool
+    if not u.GetGUIThreadInfo(tid, ctypes.byref(gti)):
+        return f
+    f["focus"] = int(gti.hwndFocus or 0)
+    f["focus_cls"] = window_class(f["focus"])
+    f["caret"] = int(gti.hwndCaret or 0)
+    return f
+
+
+def focus_target_state():
+    """返回 `(state, 现场 dict)`；state ∈ edit / nonedit / unknown。
+
+    现场 dict 里额外带三样东西：
+      * `uia`     —— UI Automation 的判定（edit/nonedit/unknown），没有就是 "off"；
+      * `uia_ok`  —— UIA 这一轮到底有没有正常工作（决定 unknown 要不要复制）；
+      * `copy`    —— **最终要不要走复制兜底**，由 `wants_copy()` 定。
+
+    为什么要 UIA：类名表对「浏览器页面里没有聚焦任何输入框」完全无能为力
+    —— 前台类名 `Chrome_WidgetWin_1` 在正判白名单里，旧逻辑一律判 edit，
+    字就打进空气里了。UIA 直接问系统「拿着焦点的元素是什么控件」，实测能分开
+    「记事本编辑区（可写 Document）」和「Chrome 空白页（只读 Document）」。
+    """
+    f = focus_facts()
+    f["uia"], f["uia_ok"] = "off", False
+    if not FOCUS_OK or not f["fg"]:
+        f["copy"] = False
+        return FOCUS_UNKNOWN, f
+
+    uia_state = None
+    if UIA_OK:
+        try:
+            uia_state, uia_facts = _uia.focused_verdict()
+            f["uia"] = uia_state
+            f["uia_ok"] = True
+            f["uia_ct"] = uia_facts.get("ct")
+            f["uia_cls"] = uia_facts.get("cls") or ""
+            f["uia_name"] = (uia_facts.get("name") or "")[:40]
+            if "err" in uia_facts:
+                f["uia_err"] = uia_facts["err"]
+        except Exception as e:
+            f["uia_err"] = repr(e)
+
+    state = judge_focus_target(f["fg_cls"], f["focus_cls"], f["focus"],
+                               bool(f["fg_cls"]), uia_state)
+    # 「所有非输入框都复制」的策略在这里落地（含判不准的情形）
+    f["copy"] = bool(wants_copy(state, f["uia_ok"])) if wants_copy else \
+        (state == FOCUS_NONEDIT)
+    return state, f
+
+
+# ---------------------------------------------------------------- 剪贴板兜底
+def set_clipboard_text(text):
+    """把文本写进剪贴板（CF_UNICODETEXT）；成功返回 True。
+
+    为什么不用 Tk 的 `clipboard_append`：Tk 的剪贴板是**按需服务**的 —— 数据
+    留在本进程里，等别的程序来取时才由本进程喂过去，本进程一退出内容就没了。
+    这里走 Win32：GlobalAlloc 一块 GMEM_MOVEABLE 内存、填好 UTF-16 文本、
+    SetClipboardData 把**所有权交给系统**，进程退出后内容依然在。
+    剪贴板可能被别的程序占着（OpenClipboard 会失败），退避重试几次。
+    """
+    if not text:
+        return False
+    k32, u = ctypes.windll.kernel32, ctypes.windll.user32
+    k32.GlobalAlloc.argtypes = [ctypes.c_uint, ctypes.c_size_t]
+    k32.GlobalAlloc.restype = wt.HGLOBAL
+    k32.GlobalLock.argtypes = [wt.HGLOBAL]
+    k32.GlobalLock.restype = ctypes.c_void_p
+    k32.GlobalUnlock.argtypes = [wt.HGLOBAL]
+    k32.GlobalUnlock.restype = ctypes.c_bool
+    k32.GlobalFree.argtypes = [wt.HGLOBAL]
+    k32.GlobalFree.restype = wt.HGLOBAL
+    u.OpenClipboard.argtypes = [wt.HWND]
+    u.OpenClipboard.restype = ctypes.c_bool
+    u.EmptyClipboard.argtypes = []
+    u.EmptyClipboard.restype = ctypes.c_bool
+    u.SetClipboardData.argtypes = [ctypes.c_uint, wt.HANDLE]
+    u.SetClipboardData.restype = wt.HANDLE
+    u.CloseClipboard.argtypes = []
+    u.CloseClipboard.restype = ctypes.c_bool
+
+    for attempt in range(CLIP_RETRY):
+        if u.OpenClipboard(None):
+            break
+        time.sleep(0.03 * (attempt + 1))
+    else:
+        out("clipboard: OpenClipboard busy, copy skipped")
+        return False
+    try:
+        if not u.EmptyClipboard():
+            out("clipboard: EmptyClipboard failed")
+            return False
+        data = text.encode("utf-16-le") + b"\x00\x00"
+        h = k32.GlobalAlloc(GMEM_MOVEABLE, len(data))
+        if not h:
+            out("clipboard: GlobalAlloc failed")
+            return False
+        p = k32.GlobalLock(h)
+        if not p:
+            out("clipboard: GlobalLock failed")
+            k32.GlobalFree(h)
+            return False
+        ctypes.memmove(p, data, len(data))
+        k32.GlobalUnlock(h)
+        if not u.SetClipboardData(CF_UNICODETEXT, h):
+            out("clipboard: SetClipboardData failed")
+            k32.GlobalFree(h)         # 没交出去，自己回收，否则内存泄漏
+            return False
+        return True                   # 成功：内存已归系统管，绝不能 GlobalFree
+    finally:
+        u.CloseClipboard()
+
+
+def get_clipboard_text():
+    """读回剪贴板文本（只给 `--copy-text` 校验与自检用）。"""
+    u, k32 = ctypes.windll.user32, ctypes.windll.kernel32
+    u.OpenClipboard.argtypes = [wt.HWND]
+    u.OpenClipboard.restype = ctypes.c_bool
+    u.GetClipboardData.argtypes = [ctypes.c_uint]
+    u.GetClipboardData.restype = wt.HANDLE
+    u.CloseClipboard.argtypes = []
+    u.CloseClipboard.restype = ctypes.c_bool
+    k32.GlobalLock.argtypes = [wt.HGLOBAL]
+    k32.GlobalLock.restype = ctypes.c_void_p
+    k32.GlobalUnlock.argtypes = [wt.HGLOBAL]
+    k32.GlobalUnlock.restype = ctypes.c_bool
+    for attempt in range(CLIP_RETRY):
+        if u.OpenClipboard(None):
+            break
+        time.sleep(0.03 * (attempt + 1))
+    else:
+        return None
+    try:
+        h = u.GetClipboardData(CF_UNICODETEXT)
+        if not h:
+            return None
+        p = k32.GlobalLock(h)
+        if not p:
+            return None
+        try:
+            return ctypes.wstring_at(p)
+        finally:
+            k32.GlobalUnlock(h)
+    finally:
+        u.CloseClipboard()
 
 
 # ------------------------------------------------------- DPI 感知（原生分辨率）
@@ -1228,6 +1997,10 @@ class ScaledCanvas:
     def create_arc(self, x0, y0, x1, y1, **kw):
         return self._cv.create_arc(*self._xy((x0, y0, x1, y1)), **self._kw(kw))
 
+    def create_text(self, x, y, **kw):
+        # 字号由调用方按 DPI 算好（负值 = 像素，Tk 的约定），这里只缩放坐标
+        return self._cv.create_text(*self._xy((x, y)), **kw)
+
     def coords(self, item, *vals):
         if not vals:                          # 读回坐标：原样返回（物理值）
             return self._cv.coords(item)
@@ -1315,6 +2088,39 @@ def _lerp_rgba(c0, c1, t):
     return tuple(int(round(a + (b - a) * t)) for a, b in zip(c0, c1))
 
 
+# ---- 中文提示文字要用的字体（「已复制」这类短提示）----
+# 优先微软雅黑（系统 UI 字体，和胶囊的 Apple 风最搭），再退黑体/宋体。
+# 一个都找不到时返回 None：调用方**不要画文字**，宁可只有徽章图形也不能报错。
+CJK_FONT_FILES = ("msyh.ttc", "msyh.ttf", "msyhl.ttc", "simhei.ttf",
+                  "simsun.ttc", "Deng.ttf")
+_FONT_CACHE = {}
+
+
+def _cjk_font(size_px):
+    """按像素大小拿一个中文字体对象；没装中文字体返回 None（结果有缓存）。"""
+    if not PIL_OK or size_px <= 0:
+        return None
+    got = _FONT_CACHE.get(size_px)
+    if got is not None:
+        return got if got != "none" else None
+    font_dir = os.path.join(os.environ.get("WINDIR", r"C:\Windows"), "Fonts")
+    from PIL import ImageFont
+    for name in CJK_FONT_FILES:
+        path = os.path.join(font_dir, name)
+        if not os.path.isfile(path):
+            continue
+        try:
+            f = ImageFont.truetype(path, size_px)
+        except Exception as e:                  # 字体损坏/被占用 -> 换下一个
+            out("font %s load failed: %r" % (name, e))
+            continue
+        _FONT_CACHE[size_px] = f
+        return f
+    out("no CJK font found in %s, toast text disabled" % font_dir)
+    _FONT_CACHE[size_px] = "none"
+    return None
+
+
 class _BLENDFUNCTION(ctypes.Structure):
     _fields_ = [("BlendOp", ctypes.c_byte), ("BlendFlags", ctypes.c_byte),
                 ("SourceConstantAlpha", ctypes.c_byte),
@@ -1359,32 +2165,63 @@ class PillRenderer:
         self.k = float(k)
         self.opaque = opaque
         self.s = self.k * SS                       # 逻辑 -> 超采样像素
-        self.w = int(round(_WIN_W * self.k))       # 窗口物理像素
+        self.dw = float(DW)                        # 胶囊本体宽度（可加宽）
+        self._cache = {}
+        self._tfont = None                         # 提示态：选好的字体
+        self._tshown = ""                          # 提示态：实际要画的（可能截断过）
+        self._resize()
+
+    def _resize(self):
+        """按当前 dw 重算窗口/超采样尺寸。加宽提示态时会被再调一次。"""
+        self.w = int(round((self.dw + 2 * DPAD) * self.k))   # 窗口物理像素
         self.h = int(round(_WIN_H * self.k))
-        self.SW = int(round(_WIN_W * self.s))
+        self.SW = int(round((self.dw + 2 * DPAD) * self.s))
         self.SH = int(round(_WIN_H * self.s))
         self._cache = {}
+
+    def set_width(self, dw):
+        """设定胶囊本体宽度（逻辑像素）；变了才重算，返回是否变了。"""
+        dw = max(float(DW), min(float(dw), TEXT_MAX_W))
+        if abs(dw - self.dw) < 0.5:
+            return False
+        self.dw = dw
+        self._resize()
+        return True
 
     def _body(self, dy=0.0):
         s = self.s
         return [(DPAD + 2) * s, (DPAD + 2 + dy) * s,
-                (DPAD + DW - 2) * s, (DPAD + DH - 2 + dy) * s]
+                (DPAD + self.dw - 2) * s, (DPAD + DH - 2 + dy) * s]
 
     def _radius(self):
         return (DH - 4) / 2.0 * self.s             # 正圆头（高 42 -> r21）
 
-    def frame(self, glyph, badge, bars, ring, phase):
-        """渲染一帧：返回物理像素尺寸的 RGBA 图。"""
-        img = self._base(glyph, badge).copy()
+    def frame(self, glyph, badge, bars, ring, phase, text=None):
+        """渲染一帧：返回物理像素尺寸的 RGBA 图。
+
+        `text` 非空时走**提示态**：不画声波条，改在原来声波条的位置画一行文字
+        （「已复制」或识别结果）。文字长的时候胶囊会**横向撑开**（`set_width`），
+        超过 TEXT_MAX_W 就截断成省略号。文字画在静态缓存层里（提示期间它不会
+        变），所以每帧的开销和平时一样。
+        """
+        if text:
+            self._tfont, self._tshown, dw = self.text_layout(text)
+            self.set_width(dw)                    # 只在宽度真变了时才清缓存
+        else:
+            self._tfont, self._tshown = None, ""
+            self.set_width(DW)
+        img = self._base(glyph, badge, text or None).copy()
         s = self.s
         d = ImageDraw.Draw(img)
         mid = (DPAD + DCY) * s
-        for j, h in enumerate(bars):
-            h = max(DBAR_W, float(h)) * s
-            x0 = (DPAD + DBAR_X0 + j * DBAR_PITCH) * s
-            col = _lerp_rgba(_rgba(BAR), _rgba(BAR_IN), j / float(DNBAR - 1))
-            d.rounded_rectangle([x0, mid - h / 2.0, x0 + DBAR_W * s, mid + h / 2.0],
-                                radius=DBAR_W * s / 2.0, fill=col)
+        if not text:                              # 提示态没有声波条（那位置给文字）
+            for j, h in enumerate(bars):
+                h = max(DBAR_W, float(h)) * s
+                x0 = (DPAD + DBAR_X0 + j * DBAR_PITCH) * s
+                col = _lerp_rgba(_rgba(BAR), _rgba(BAR_IN), j / float(DNBAR - 1))
+                d.rounded_rectangle([x0, mid - h / 2.0, x0 + DBAR_W * s,
+                                     mid + h / 2.0],
+                                    radius=DBAR_W * s / 2.0, fill=col)
         if ring:
             cx = (DPAD + DCX) * s
             rr = (DBADGE_R + 2 + 4 * phase) * s
@@ -1395,15 +2232,48 @@ class PillRenderer:
                           width=max(1, int(round(2 * s))))
         return img.resize((self.w, self.h), Image.LANCZOS)
 
-    def _base(self, glyph, badge):
-        key = (glyph, badge)
+    def text_layout(self, text):
+        """算提示文字该用哪个字号、要不要截断、胶囊要加宽到多少。
+
+        返回 `(font, 实际要画的文字, 胶囊本体宽度)`；一个中文字体都找不到时返回
+        `(None, "", DW)`，那时只画图形不画字（和以前的行为一致）。
+        """
+        s = self.s
+        max_text_w = (TEXT_MAX_W - DBAR_X0 - TEXT_PAD_R) * s
+        fonts = {}
+
+        def measure(size, t):
+            f = fonts.get(size, 0)
+            if f == 0:
+                f = _cjk_font(int(round(size * s)))
+                fonts[size] = f
+            return f.getlength(t) if f else 1e18      # 没字体 -> 永远「放不下」
+
+        size, shown = fit_text(text, max_text_w, measure)
+        font = fonts.get(size)
+        if font is None:
+            return None, "", DW
+        w = font.getlength(shown)
+        return font, shown, max(DW, DBAR_X0 + TEXT_PAD_R + w / s)
+
+    def _text(self, d, text):
+        """在声波条那块（逻辑像素 x=46 起）画提示文字（已按宽度截断/选好字号）。"""
+        font = getattr(self, "_tfont", None)
+        if font is None:
+            return                                    # 没中文字体：只有图形，不画字
+        s = self.s
+        d.text(((DPAD + DBAR_X0) * s, (DPAD + DCY) * s), self._tshown or text,
+               font=font, fill=_rgba(INK), anchor="lm")
+
+    def _base(self, glyph, badge, text=None):
+        key = (glyph, badge, text)
         got = self._cache.get(key)
         if got is None:
-            got = self._build(glyph, badge)
+            got = self._build(glyph, badge, text)
             self._cache[key] = got
         return got
 
-    def _build(self, glyph, badge):
+    def _build(self, glyph, badge, text=None):
         s = self.s
         W, H = self.SW, self.SH
         img = Image.new("RGBA", (W, H), (0, 0, 0, 0))
@@ -1439,12 +2309,24 @@ class PillRenderer:
         r = DBADGE_R * s
         d.ellipse([cx - r, cy - r, cx + r, cy + r], fill=_rgba(badge))
         self._glyph(d, glyph, cx, cy, s)
+        if text:                                  # 提示文字：静态，进缓存层
+            self._text(d, text)
         return img
 
     def _glyph(self, d, kind, cx, cy, s):
-        """徽章内图形（mic/check/bang），几何沿用原设计稿，只是变成抗锯齿的。"""
+        """徽章内图形（mic/check/bang/copy），几何沿用原设计稿，只是变成抗锯齿的。"""
         col = _rgba(TXT)
         w = 2.4 * s
+        if kind == "copy":
+            # 两张叠起来的纸（Apple「拷贝」图标）：后面那张只描边，前面那张实心，
+            # 实心那张正好把重叠处盖掉 —— 一眼就能读成「复制」。
+            # 只描边+加个顶部小夹子的画法在 24px 徽章里会被看成电池，别改回去。
+            d.rounded_rectangle([cx - 2.5 * s, cy - 7.5 * s, cx + 7.5 * s,
+                                 cy + 3.5 * s], radius=1.8 * s, outline=col,
+                                width=max(1, int(round(1.9 * s))))
+            d.rounded_rectangle([cx - 7.5 * s, cy - 3.5 * s, cx + 2.5 * s,
+                                 cy + 7.5 * s], radius=1.8 * s, fill=col)
+            return
         if kind == "check":
             pts = [(cx - 5 * s, cy), (cx - 1.5 * s, cy + 4 * s),
                    (cx + 5.5 * s, cy - 5 * s)]
@@ -1546,6 +2428,40 @@ class LayeredWindow:
         self._old = g.SelectObject(self._hdc, self._hbm)
         u.ReleaseDC(None, hdc)
 
+    def resize(self, w, h):
+        """改窗口/DIB 尺寸（提示态把胶囊加宽时要重建那块 DIB）。"""
+        w, h = int(w), int(h)
+        if (w, h) == (self.w, self.h):
+            return
+        u, g = ctypes.windll.user32, ctypes.windll.gdi32
+        if self._hdc and self._old:
+            g.SelectObject.argtypes = [wt.HDC, wt.HGDIOBJ]
+            g.SelectObject.restype = wt.HGDIOBJ
+            g.SelectObject(self._hdc, self._old)      # 先把旧位图摘下来才能删
+        if self._hbm:
+            g.DeleteObject.argtypes = [wt.HGDIOBJ]
+            g.DeleteObject.restype = ctypes.c_bool
+            g.DeleteObject(self._hbm)
+            self._hbm = None
+        self.w, self.h = w, h
+        bmi = _BITMAPINFO()
+        bmi.bmiHeader.biSize = ctypes.sizeof(_BITMAPINFOHEADER)
+        bmi.bmiHeader.biWidth = self.w
+        bmi.bmiHeader.biHeight = -self.h              # 负数 = top-down
+        bmi.bmiHeader.biPlanes = 1
+        bmi.bmiHeader.biBitCount = 32
+        bmi.bmiHeader.biCompression = 0
+        g.CreateDIBSection.argtypes = [
+            wt.HDC, ctypes.POINTER(_BITMAPINFO), wt.UINT,
+            ctypes.POINTER(ctypes.c_void_p), wt.HANDLE, wt.DWORD]
+        g.CreateDIBSection.restype = wt.HBITMAP
+        hdc = u.GetDC(None)
+        self._bits = ctypes.c_void_p()
+        self._hbm = g.CreateDIBSection(hdc, ctypes.byref(bmi), 0,
+                                       ctypes.byref(self._bits), None, 0)
+        g.SelectObject(self._hdc, self._hbm)
+        u.ReleaseDC(None, hdc)
+
     def _on_msg(self, hwnd, msg, wparam, lparam):
         if msg == 0x0201:                       # WM_LBUTTONDOWN：点胶囊=开始/结束
             if self.on_click:
@@ -1633,6 +2549,7 @@ class LayeredView:
         self.glyph, self.badge = "mic", ACCENT
         self.bars = [7.0] * DNBAR
         self.ring, self.phase = False, 0.0
+        self.text = None
         self.visible = False
         self._dirty = True
         self._frames = 0
@@ -1644,6 +2561,20 @@ class LayeredView:
         self.glyph, self.badge = kind, badge
         self._dirty = True
 
+    def set_text(self, text):
+        """提示文字（None/空 = 回到声波条形态）。
+
+        文字长的时候胶囊要**横向撑开**，所以这里先算一遍宽度、连窗口一起改掉；
+        胶囊始终在底部居中，加宽后必须重算 x，否则会往右偏出去。
+        """
+        self.text = text or None
+        dw = self.r.text_layout(self.text)[2] if self.text else DW
+        if self.r.set_width(dw):
+            self.win.resize(self.r.w, self.r.h)
+            if self.visible:
+                self._place()
+        self._dirty = True
+
     def set_bars(self, heights):
         self.bars = list(heights)
         self._dirty = True
@@ -1653,12 +2584,17 @@ class LayeredView:
         self.phase = (now * 1.4) % 1.0 if visible else 0.0
         self._dirty = True
 
-    def show(self):
+    def _place(self):
+        """按当前窗口尺寸把胶囊摆到底部居中，返回工作区。"""
         wa = work_area()
         k = self.ov.k
         self._x = wa.left + max(0, (wa.right - wa.left - self.r.w) // 2)
         # 胶囊底边距工作区底 16 逻辑像素（窗口底还含 DPAD 的投影留白）
         self._y = wa.bottom - int(round(16 * k)) - int(round((DPAD + DH) * k))
+        return wa
+
+    def show(self):
+        wa = self._place()
         self.visible = True
         self._dirty = True
         out("show wa=(%d,%d,%d,%d) geom=%dx%d+%d+%d view=layered"
@@ -1680,7 +2616,7 @@ class LayeredView:
             if self.visible and (self._dirty or force):
                 t0 = time.time()
                 img = self.r.frame(self.glyph, self.badge, self.bars,
-                                   self.ring, self.phase)
+                                   self.ring, self.phase, self.text)
                 self.win.present(img, self._x, self._y)
                 self._dirty = False
                 ms = (time.time() - t0) * 1000.0
@@ -1709,11 +2645,16 @@ class CanvasView:
                       bg=(CAP_FILL if opaque else TRANS),
                       highlightthickness=0, bd=0), k)
         self.cv.pack()
-        round_rect(self.cv, 1, 1, DW - 1, DH - 1, r=22,
-                   fill=(CAP_HAIR if not opaque else "#FF00FF"), outline="")
-        round_rect(self.cv, 3, 3, DW - 3, DH - 3, r=20,
-                   fill=(CAP_FILL if not opaque else "#FF00FF"),
-                   outline=CAP_EDGE, width=1)
+        self.cap_outer = round_rect(self.cv, 1, 1, DW - 1, DH - 1, r=22,
+                                    fill=(CAP_HAIR if not opaque else "#FF00FF"),
+                                    outline="")
+        self.cap_inner = round_rect(self.cv, 3, 3, DW - 3, DH - 3, r=20,
+                                    fill=(CAP_FILL if not opaque else "#FF00FF"),
+                                    outline=CAP_EDGE, width=1)
+        self.dw = float(DW)
+        self.visible = False
+        self._font = tkfont.Font(family="Microsoft YaHei UI",
+                                 size=-int(round(14 * k)))
         cx, cy = DCX, DCY
         self.rings = [self.cv.create_oval(cx - 16, cy - 16, cx + 16, cy + 16,
                                           outline="", width=2, state="hidden")]
@@ -1735,7 +2676,11 @@ class CanvasView:
                                     capstyle="round", state="hidden"),
                 self.cv.create_oval(cx - 1.3, cy + 3.5, cx + 1.3, cy + 6.1,
                                     fill=TXT, outline="", state="hidden")]
-        self.glyphs = {"mic": mic, "check": check, "bang": bang}
+        copy = [round_rect(self.cv, cx - 2.5, cy - 7.5, cx + 7.5, cy + 3.5,
+                           r=1.8, outline=TXT, width=2, state="hidden"),
+                round_rect(self.cv, cx - 7.5, cy - 3.5, cx + 2.5, cy + 7.5,
+                           r=1.8, fill=TXT, outline="", state="hidden")]
+        self.glyphs = {"mic": mic, "check": check, "bang": bang, "copy": copy}
         self.bars, self.caps, self.bar_w = [], [], DBAR_W
         for j in range(DNBAR):
             col = _blend(BAR, BAR_IN, j / float(DNBAR - 1))
@@ -1746,6 +2691,10 @@ class CanvasView:
                 x, DCY - 7, x + DBAR_W, DCY + 7 - DBAR_W, fill=col, outline=""),
                 self.cv.create_oval(x, DCY + 7 - DBAR_W, x + DBAR_W, DCY + 7,
                                     fill=col, outline="")))
+        # 提示文字（「已复制」）：位置就是声波条那块，提示时把声波条藏起来
+        self.toast = self.cv.create_text(
+            DBAR_X0, DCY, text="", anchor="w", fill=INK, state="hidden",
+            font=("Microsoft YaHei UI", -int(round(14 * k))))
         self.cv.bind("<Button-1>", lambda e: ov.request_toggle())
         self._exstyle_done = False
 
@@ -1755,6 +2704,54 @@ class CanvasView:
             for it in (items if isinstance(items, list) else [items]):
                 self.cv.itemconfig(it, state=st)
         self.cv.itemconfig(self.badge, fill=badge)
+
+    def _set_width(self, dw):
+        """回退路径也要能把胶囊撑开：重画那两层圆角矩形，并降到底层。"""
+        dw = max(float(DW), min(float(dw), TEXT_MAX_W))
+        if abs(dw - self.dw) < 0.5:
+            return False
+        self.dw = dw
+        opaque = self.ov.opaque
+        self.cv.config(width=int(round(dw * self.ov.k)))
+        self.cv.delete(self.cap_outer)
+        self.cv.delete(self.cap_inner)
+        self.cap_outer = round_rect(self.cv, 1, 1, dw - 1, DH - 1, r=22,
+                                    fill=(CAP_HAIR if not opaque else "#FF00FF"),
+                                    outline="")
+        self.cap_inner = round_rect(self.cv, 3, 3, dw - 3, DH - 3, r=20,
+                                    fill=(CAP_FILL if not opaque else "#FF00FF"),
+                                    outline=CAP_EDGE, width=1)
+        # 新画的图形在最上层，要压回胶囊底色去（先内后外，外层的才在最底）
+        self.cv.tag_lower(self.cap_inner)
+        self.cv.tag_lower(self.cap_outer)
+        return True
+
+    def set_text(self, text):
+        """提示文字：显示时藏起声波条（和分层窗口那边同一个视觉约定）。
+
+        文字长的时候同样把胶囊撑开。回退路径做得简单些：字号固定，只做「放得下
+        就整段显示、放不下就省略号截断」，不像分层窗口那边还逐个字号试。
+        """
+        text = text or None
+        self._tshown = ""
+        if text:
+            def meas(_size, t):
+                return self._font.measure(t)
+            _size, self._tshown = fit_text(
+                text, (TEXT_MAX_W - DBAR_X0 - TEXT_PAD_R) * self.ov.k, meas)
+            need = DBAR_X0 + TEXT_PAD_R + \
+                self._font.measure(self._tshown) / float(self.ov.k)
+            if self._set_width(need) and self.visible:
+                self._place()
+        else:
+            self._set_width(DW)
+        self.cv.itemconfig(self.toast, text=self._tshown,
+                           state=("normal" if text else "hidden"))
+        for it in self.bars:
+            self.cv.itemconfig(it, state=("hidden" if text else "normal"))
+        for pair in self.caps:
+            for it in pair:
+                self.cv.itemconfig(it, state=("hidden" if text else "normal"))
 
     def set_bars(self, heights):
         ends = []
@@ -1781,18 +2778,26 @@ class CanvasView:
         self.cv.itemconfig(rid, state="normal",
                            outline=_blend(ACCENT, CAP_FILL, phase))
 
-    def show(self):
+    def _place(self):
+        """按当前胶囊宽度把窗口摆到底部居中，返回工作区。"""
         wa = work_area()
         k = self.ov.k
-        w, h = int(round(DW * k)), int(round(DH * k))
-        x = wa.left + max(0, (wa.right - wa.left - w) // 2)
-        y = wa.bottom - h - int(round(16 * k))
+        w, h = int(round(self.dw * k)), int(round(DH * k))
+        self._geom = (w, h, wa.left + max(0, (wa.right - wa.left - w) // 2),
+                      wa.bottom - h - int(round(16 * k)))
+        return wa
+
+    def show(self):
+        wa = self._place()
+        k = self.ov.k
+        w, h, x, y = self._geom
         out("show wa=(%d,%d,%d,%d) geom=%dx%d+%d+%d view=canvas"
             % (wa.left, wa.top, wa.right, wa.bottom, w, h, x, y))
         self.root.geometry("%dx%d+%d+%d" % (w, h, x, y))
         self.root.deiconify()
         self.root.lift()
         self.root.attributes("-topmost", True)
+        self.visible = True
         if not self._exstyle_done:
             self.root.update_idletasks()
             u = ctypes.windll.user32
@@ -1809,6 +2814,7 @@ class CanvasView:
         out("show hwnd=%d state-ok" % self.root.winfo_id())
 
     def hide(self):
+        self.visible = False
         self.root.withdraw()
 
     def destroy(self):
@@ -1873,6 +2879,7 @@ class Overlay:
         self._kept_streamed = False      # 最终为空但保住了流式文字
         self._kept_len = 0               # 保住的字符数（用于日志/展示）
         self.target_hwnd = None          # 本轮文字要落进的窗口
+        self.copy_only = False           # 焦点不在输入框 -> 本轮只复制、不注入
 
         # ---- UI 分辨率：进程先设为 DPI 感知（必须在建 Tk 窗口前），再按实测
         # DPI 把 100x46 逻辑设计稿放大到物理像素原生渲染，消除位图拉伸发虚。
@@ -1933,7 +2940,27 @@ class Overlay:
         self.view.show()
 
     def _hide(self):
+        self.view.set_text(None)          # 提示文字不能带到下一次显示
         self.view.hide()
+
+    # ---- 提示（「已复制」或绿色对勾）----
+    def _toast(self, text, glyph="copy", badge=None, cap=TOAST_MS_MAX):
+        """悬浮球里弹一条提示，到时自动收起。"""
+        self.state = self.DONE
+        self._set_glyph(glyph, badge or ACCENT)
+        self.view.set_text(text)
+        self._show()
+        out("toast: %s" % text)
+        self.root.after(toast_ms(len(text), cap), self._finish_done)
+
+    def _check_feedback(self):
+        """输入框成功上屏只显示绿色对勾，不把识别全文画到悬浮球。"""
+        self.state = self.DONE
+        self._set_glyph("check", GREEN)
+        self.view.set_text(None)
+        self._show()
+        out("toast: check")
+        self.root.after(TOAST_MS, self._finish_done)
 
     # ---- 录音 ----
     def _audio_cb(self, indata, frames, time_info, status):
@@ -1945,6 +2972,7 @@ class Overlay:
         self.frames = []
         self.level = 0.0
         self.rec_start = time.time()
+        self.view.set_text(None)         # 清掉上一轮的提示文字（回到声波条形态）
         # 流式状态复位：清空已上屏文本、开发送闸门、轮次 +1 让旧线程退出
         with self._emit_lock:
             self.emitted = ""
@@ -1952,29 +2980,67 @@ class Overlay:
             self.rec_gen += 1
             gen = self.rec_gen
         self.target_hwnd = get_foreground_hwnd()   # 文字要落进的那个窗口
+        # 焦点在不在一个「输入框」里？不在（桌面/列表/任务栏/终端/浏览器页面空白处…）
+        # 就整轮不注入，识别完把文字复制进剪贴板 + 弹「已复制」提示。
+        # 策略是**所有非输入框都复制**（含 UIA 正常但判不准的情形）。
+        state, facts = focus_target_state()
+        self.copy_only = bool(facts.get("copy"))
+        out("focus target=%s fg=%s focus=%s caret=%s uia=%s ct=%s name=%r -> %s"
+            % (state, facts.get("fg_cls") or "?", facts.get("focus_cls") or "-",
+               facts.get("caret") or 0, facts.get("uia") or "off",
+               facts.get("uia_ct") or "-", facts.get("uia_name") or "",
+               "copy only" if self.copy_only else "inject"))
+        # 麦克风每次录音前重读配置 -> 在设置窗口改完设备，下一次按住说话就生效，
+        # 不用重启悬浮球（llama-server 那些进程级参数才需要重启）。
+        dev, dev_desc = asr_input_device()
         try:
             self.stream = sd.InputStream(samplerate=SAMPLE_RATE,
                                          blocksize=BLOCK, dtype="int16",
-                                         channels=1, callback=self._audio_cb)
+                                         channels=1, device=dev,
+                                         callback=self._audio_cb)
             self.stream.start()
         except Exception as e:
             out("mic open failed: %r" % (e,))
-            with self._emit_lock:
-                self.stream_halt = True
-            self._set_glyph("bang", WARN)
-            self.state = self.DONE
-            self._show()
-            self.root.after(1500, self._finish_done)
-            return
+            # 配置的设备被拔了/被独占（另一软件占着）时，退回系统默认再试一次 ——
+            # 宁可换个麦继续录，也不能让语音输入直接罢工。
+            if dev is not None:
+                out("mic fallback: %s -> system default (%s)" % (dev_desc, e))
+                try:
+                    self.stream = sd.InputStream(samplerate=SAMPLE_RATE,
+                                                 blocksize=BLOCK, dtype="int16",
+                                                 channels=1, callback=self._audio_cb)
+                    self.stream.start()
+                    dev_desc = "system default (fallback from %s)" % (dev_desc,)
+                except Exception as e2:
+                    out("mic default open failed too: %r" % (e2,))
+                    self._mic_failed()
+                    return
+            else:
+                self._mic_failed()
+                return
         self.state = self.REC
         self._set_glyph("mic", ACCENT)
         self._show()
-        out("record start")
+        out("record start (mic=%s)" % (dev_desc,))
         threading.Thread(target=self._stream_loop, args=(gen,),
                          daemon=True).start()
 
+    def _mic_failed(self):
+        """打不开麦克风时的统一收尾：橙色 ！ + 1.5 秒后收起。"""
+        with self._emit_lock:
+            self.stream_halt = True
+        self._set_glyph("bang", WARN)
+        self.state = self.DONE
+        self._show()
+        self.root.after(1500, self._finish_done)
+
     # ---- 流式识别：边说边把增量打进目标框 ----
     def _stream_loop(self, gen):
+        if self.copy_only:
+            # 目标根本收不了字：不做流式（也就没有「已上屏」要对账），
+            # 松开后一次性复制整段结果。
+            out("stream disabled: focus is not an edit box")
+            return
         last_bytes, last_run = 0, 0.0
         prev = ""                          # 上一轮的识别文本（做双轮稳定）
         while True:
@@ -2139,9 +3205,13 @@ class Overlay:
             # 焦点变了：宁可留下错位的流式文字，也绝不去别的窗口按退格
             out("reconcile retract skipped: focus changed (text left in place)")
             return ""
-        if not send_backspaces(trim):
+        secs = reconcile_secs()
+        t0 = time.time()
+        if not send_backspaces(trim, secs):
             out("reconcile retract failed: append nothing")
             return ""
+        out("reconcile: removed %d chars in %.0fms (budget %.1fs)"
+            % (trim, (time.time() - t0) * 1000, secs))
         return insert
 
     def _recognize(self):
@@ -2176,6 +3246,15 @@ class Overlay:
                 out("recognize error: %r" % (e,))
         if backend:
             out("backend=%s chars=%d" % (backend, len(text)))
+        if self.copy_only:
+            # 焦点不在输入框：一个字都不注入，整段复制进剪贴板，UI 线程弹「已复制」。
+            # （copy_only 时流式是关的，emitted 必为空，所以没有对账要跑。）
+            copied = bool(text) and (not self.no_send) and set_clipboard_text(text)
+            out("clipboard fallback: %s chars, copied=%s"
+                % (len(text or ""), copied))
+            self.q.put(("result", {"display": text or "", "send": "",
+                                   "kept": 0, "copy": copied}))
+            return
         # 3) 与流式已上屏的部分对账，得出真正需要补发的增量
         with self._emit_lock:
             had_streamed = bool(self.emitted)
@@ -2204,6 +3283,7 @@ class Overlay:
         display = payload.get("display", "")
         send_part = payload.get("send", "")
         kept = payload.get("kept", 0)
+        copied = bool(payload.get("copy"))
         if kept:
             out("result: (empty final, %d streamed chars kept)" % kept)
             ok = True
@@ -2214,13 +3294,24 @@ class Overlay:
             out("result: (empty)")
             ok = False
         if send_part and not self.no_send:
-            send_text(send_part)
+            if not send_text(send_part):
+                # SendInput 没落地（目标其实收不了字，比如自绘界面里没聚焦输入框）
+                # -> 同样兜底复制，别让用户白说一遍
+                copied = bool(display) and set_clipboard_text(display)
+                out("send failed -> clipboard fallback: copied=%s" % copied)
         if self.state == self.REC:
             return                       # 用户已开了新一轮，别打断它
+        # 复制兜底：球上**只**给「已复制」这四个字，不把识别内容一起画出来。
+        # 用户明确要求「只要复制提示，具体内容不要显示」—— 内容已经在剪贴板里，
+        # 他随手 Ctrl+V 就能看到；球上再复述一遍只是占地方。
+        # （正常注入那条路照旧预览识别结果，那是「打进去了什么」的凭据。）
+        if copied:
+            self._toast(TOAST_TEXT)
+            return
         if ok:
-            self._set_glyph("check", GREEN)
-        else:
-            self._set_glyph("bang", WARN)
+            self._check_feedback()
+            return
+        self._set_glyph("bang", WARN)
         self.state = self.DONE
         self.root.after(900, self._finish_done)
 
@@ -2238,9 +3329,16 @@ class Overlay:
 
     def _on_chord(self, kind):
         if kind == "start":
-            if self.state == self.HIDDEN:
+            if self.state in (self.HIDDEN, self.DONE):
+                # DONE = 上一条识别结果的提示还挂在屏幕上。这时用户又开口了，
+                # 必须**立刻**开录：提示是给人看的，不是闸门。排队等提示自己
+                # 收掉的话，一段长结果能让下一次说话干等好几秒。
+                if self.state == self.DONE:
+                    out("toast dismissed by new recording")
+                self.state = self.HIDDEN
+                self._hide()
                 self.start_rec()
-            elif self.state in (self.PROC, self.DONE):
+            elif self.state == self.PROC:
                 self.pending_start = True
                 out("chord start queued (busy)")
             # REC：已在录，忽略重复
@@ -2256,14 +3354,17 @@ class Overlay:
         self.q.put(("toggle", None))
 
     def _on_toggle(self):
-        if self.state == self.HIDDEN:
+        if self.state in (self.HIDDEN, self.DONE):
+            if self.state == self.DONE:      # 同上：点一下就开始，别等提示收掉
+                self.state = self.HIDDEN
+                self._hide()
             self.start_rec()
         elif self.state == self.REC:
             self.stop_rec()
-        # 识别中 / 已上屏的短暂展示期：忽略，避免打断
+        # 识别中：忽略，避免打断
 
     def _set_glyph(self, kind, badge_color):
-        """切换徽章内图形（mic/check/bang）与徽章底色 —— Apple 式无文字状态。"""
+        """切换徽章内图形（mic/check/bang/copy）与徽章底色 —— Apple 式无文字状态。"""
         self.view.set_glyph(kind, badge_color)
 
     # ---- 动画（数值都是逻辑像素，由视图层自己换算到物理像素）----
@@ -2441,8 +3542,8 @@ def selftest():
     assert reconcile_plan("", "今天天气真好") == ("keep_all", "")
 
     # 15c) 公共前缀裁剪：只删「真正变了」的那一截，退格数不随整句长度增长。
-    #      这是「删除耗时固定」的落点——退格数直接等于卡顿时长（每键 ~5ms）。
-    #      整段重打是 2n 个事件，trim 恒 <= 2n，永远不会更慢。
+    #      这是「删除耗时固定」的落点——退格数直接等于要删的字数。整段重打是
+    #      2n 个事件，trim 恒 <= 2n，永远不会更慢。
     #      注意签名为 reconcile_plan(text=最终, emitted=已上屏)
     assert reconcile_plan("今天天气真好啊", "今天天气真不错") == ("trim", (2, "好啊"))
     # 尾巴变短：删多补少（删 2 补 0）
@@ -2469,6 +3570,83 @@ def selftest():
         assert trim == 3, "n=%d 只该删 3 个字，实得 %d" % (n, trim)
         assert trim + len(insert) == 6, \
             "n=%d 事件数应为 6，实得 %d" % (n, trim + len(insert))
+
+    # 15d) 替换预览的节奏。两条通道各有各的节奏函数：
+    #      * 慢通道 backspace_pace（真实键盘注入，兜底）：每格不得低于可靠投递下限
+    #        （低于下限会静默丢退格，屏幕上就是残留错字——比慢严重得多）；
+    #      * 快通道 fast_delete_pace（直接投键消息）：**没有下限**，「调多快就真的
+    #        多快」，0 秒 = 一口气投完 —— 这正是本轮需求「调快替换时间，但一个字
+    #        都不许少删」的落点。
+    #      两条都保持「恒定」：预算装得下时总时长 == 预算，不随句子长短变。
+    for n in (1, 3, 12, 24, 30):
+        h, g = backspace_pace(n, 1.0)
+        # 墙钟总时长 = 每格 sleep + 每格固定开销，必须恰好落在预算上
+        assert abs(n * (h + g + BACKSPACE_OVERHEAD) - 1.0) < 1e-9, \
+            "n=%d 墙钟不是 1s: %.4fs" % (n, n * (h + g + BACKSPACE_OVERHEAD))
+        assert h > 0 and g > 0, "n=%d 不能退化成 0 间隔" % n
+    # 慢通道下限：约 31 格以上每格 sleep 就是 24ms，总时长被下限顶长，
+    # 但这才是可靠投递的门槛（低于它直接丢退格、屏幕上留错字）
+    for n in (31, 42, 46, 100):
+        h, g = backspace_pace(n, 1.0)
+        assert abs((h + g) - BACKSPACE_FLOOR) < 1e-9, \
+            "n=%d 应压到下限 %.3f，实得 %.3f" % (n, BACKSPACE_FLOOR, h + g)
+    # 「恒定」的含义：预算装得下时总时长都恰好是预算，不随句长变化
+    for n in (5, 10, 20, 30):
+        h, g = backspace_pace(n, 1.0)
+        assert abs(n * (h + g + BACKSPACE_OVERHEAD) - 1.0) < 1e-9, \
+            "n=%d 总时长不是 1s" % n
+    # 无论 n 多大，慢通道每格 sleep 都不会低于下限（恒定 ≠ 靠丢键换速度）
+    for n in (1, 5, 12, 31, 46, 200, 1000):
+        h, g = backspace_pace(n, 1.0)
+        assert h + g >= BACKSPACE_FLOOR - 1e-12, "n=%d 低于可靠下限" % n
+        assert h >= BACKSPACE_HOLD - 1e-12, "n=%d 按住时间低于实测门槛" % n
+    # 预算可调：2s 预算 -> 墙钟 2s；n=0 一个键都不发
+    h, g = backspace_pace(20, 2.0)
+    assert abs(20 * (h + g + BACKSPACE_OVERHEAD) - 2.0) < 1e-9
+    assert backspace_pace(0) == (0.0, 0.0)
+    # 非法预算退回默认（配置文件被人手改坏不能把节奏搞崩）
+    assert backspace_pace(10, "abc") == backspace_pace(10, RECONCILE_SECS_DEFAULT)
+    assert backspace_pace(10, None) == backspace_pace(10, RECONCILE_SECS_DEFAULT)
+
+    # 15e) 快通道：**没有每格下限**（本轮需求的核心：调多快就真的多快）
+    assert fast_delete_pace(46, 0.0) == 0.0, "0 秒必须是一口气投完"
+    assert abs(fast_delete_pace(10, 1.0) - 0.1) < 1e-12
+    assert fast_delete_pace(100, 3.0) == 0.03
+    assert fast_delete_pace(0, 1.0) == 0.0
+    assert fast_delete_pace(10, None) == 0.0        # 非法预算退回默认（0 = 立刻）
+    assert fast_delete_pace(10, -5) == 0.0          # 负数当 0：只许更快，不许负 sleep
+    for n in (1, 12, 46, 1000):                     # 任意 n 都不撞下限
+        assert fast_delete_pace(n, 0.1) <= 0.1 + 1e-12, "n=%d 撞下限" % n
+    # 键消息 lParam 的位段：scan code 在 16-23 位，松开位 30/31
+    assert fast_delete_lparam(0x0E) == 0x000E0001
+    assert fast_delete_lparam(0x0E, True) == 0xC00E0001
+    assert fast_delete_lparam(BACKSPACE_SCAN) == (1 | (BACKSPACE_SCAN << 16))
+    # 黑名单：UWP / XAML 岛退回慢通道，普通窗口照走快通道
+    assert not fast_delete_class_ok("Windows.UI.Core.CoreWindow")
+    assert not fast_delete_class_ok("XamlIslandWindow")
+    assert fast_delete_class_ok("RichEditD2DPT")
+    assert fast_delete_class_ok("Chrome_WidgetWin_1")
+    assert fast_delete_class_ok("TkChild")
+    assert fast_delete_class_ok("")                 # 类名读不到不当作黑名单
+
+    # 15f) reconcile_secs 的解析：0.0 是合法值（= 立刻），越界/坏值退回默认
+    assert parse_reconcile_secs("0") == 0.0
+    assert parse_reconcile_secs("0.0") == 0.0
+    assert parse_reconcile_secs("0.4") == 0.4
+    assert parse_reconcile_secs("3.0") == RECONCILE_SECS_MAX
+    assert parse_reconcile_secs("3.1") == RECONCILE_SECS_DEFAULT
+    assert parse_reconcile_secs("-1") == RECONCILE_SECS_DEFAULT
+    assert parse_reconcile_secs("abc") == RECONCILE_SECS_DEFAULT
+    assert parse_reconcile_secs(None) == RECONCILE_SECS_DEFAULT
+    assert parse_reconcile_secs("") == RECONCILE_SECS_DEFAULT
+    assert isinstance(reconcile_secs(), float)
+    # 0.2.39：默认必须是「立刻替换」。默认慢一档 = 每次识别结束都白等一秒，
+    # 而这正是用户报的「时长太长」；快通道已经证明 0 秒既最快又一格不丢，
+    # 所以「默认快」和「删干净」不冲突（不要把它改回 1.0）。
+    assert RECONCILE_SECS_DEFAULT == 0.0, \
+        "默认必须是「立刻替换」，实得 %r" % (RECONCILE_SECS_DEFAULT,)
+    assert fast_delete_pace(46, RECONCILE_SECS_DEFAULT) == 0.0, \
+        "默认预算下快通道必须一口气投完（不铺时长）"
 
     # 15b) 端到端不变量：把「流式续发 + 最终对账」跑在一块虚拟屏幕上，
     #      跑完屏幕内容必须恰好等于最终结果，退格数必须恰好等于已注入字数
@@ -2647,28 +3825,159 @@ def selftest():
                     "hotkey_recorder_pid=1234").group(1) == "1234"
     assert isinstance(hotkey_recording_active(), bool)
 
+    # 17) 焦点判定：识别出的文字该不该注入（规则表在 voice_overlay_focus.py，
+    #     完整回归在 tmp/test-focus-target.py；这里跑几条**实机实测过**的代表场景，
+    #     保证悬浮球真的接上了那份规则表）
+    assert FOCUS_OK, "voice_overlay_focus 没导入成功，兜底复制功能会失效"
+    cases = [
+        # (顶层窗口类, 焦点控件类, 期望)
+        ("Notepad", "RichEditD2DPT", FOCUS_EDIT),          # 记事本：能打字
+        ("Chrome_WidgetWin_1", "Chrome_WidgetWin_1", FOCUS_EDIT),   # 浏览器/Electron
+        ("OpusApp", "_WwG", FOCUS_EDIT),                   # Word 文档区
+        ("#32770", "Button", FOCUS_NONEDIT),               # 对话框的「确定」
+        ("CabinetWClass", "DirectUIHWND", FOCUS_NONEDIT),  # 资源管理器文件列表
+        ("Shell_TrayWnd", "Edit", FOCUS_NONEDIT),          # 任务栏（带陈旧焦点）
+        ("CASCADIA_HOSTING_WINDOW_CLASS", "Edit", FOCUS_NONEDIT),  # Windows 终端
+        ("Progman", "Edit", FOCUS_NONEDIT),                # 桌面（带陈旧焦点）
+        ("#32769", "Edit", FOCUS_NONEDIT),                 # GetDesktopWindow()
+        ("TkTopLevel", "TkChild", FOCUS_UNKNOWN),          # Tk：Entry/按钮同名，判不了
+        ("SomeCustomFrame", "SomeCustomFrame", FOCUS_UNKNOWN),     # 判不了 -> 注入
+    ]
+    for fg_cls, focus_cls, want in cases:
+        got = judge_focus_target(fg_cls, focus_cls, 0x100)
+        assert got == want, "焦点判定 %s/%s 应为 %s，实际 %s" % (
+            fg_cls, focus_cls, want, got)
+    assert judge_focus_target("Notepad", "Edit", 0) == FOCUS_UNKNOWN, \
+        "拿不到焦点控件时不能凭空判成「不在输入框」"
+
+    # 17b) UIA 的信号要能压过类名表（这才是修好「浏览器页面里没聚焦输入框」的关键）
+    assert judge_focus_target("Chrome_WidgetWin_1", "Chrome_WidgetWin_1", 0x100,
+                              True, FOCUS_NONEDIT) == FOCUS_NONEDIT, \
+        "UIA 说焦点是只读 Document/死物时必须判 nonedit"
+    assert judge_focus_target("SomeUnknownApp", "X", 0x100, True,
+                              FOCUS_EDIT) == FOCUS_EDIT, \
+        "UIA 说是可写 Document/Edit 时必须判 edit（记事本的编辑区就是 Document）"
+    assert judge_focus_target("Progman", "Edit", 0x100, True,
+                              FOCUS_EDIT) == FOCUS_NONEDIT, \
+        "桌面永远优先判 nonedit，不能被 UIA 翻过来"
+
+    # 17c) 复制策略：**所有非输入框都复制**（含 UIA 正常但判不准的情形）；
+    #      但 UIA 整个挂掉时不敢一律复制，否则所有软件里打字都变成静默复制
+    assert wants_copy(FOCUS_NONEDIT, False) is True
+    assert wants_copy(FOCUS_UNKNOWN, True) is True
+    assert wants_copy(FOCUS_UNKNOWN, False) is False
+    assert wants_copy(FOCUS_EDIT, True) is False
+    assert UIA_OK, "voice_overlay_uia 没导入成功，浏览器空白页面会照旧打空"
+    assert _uia.decide(50030, False) == FOCUS_EDIT      # 记事本：可写 Document
+    assert _uia.decide(50030, True) == FOCUS_NONEDIT    # 浏览器页面正文
+    assert _uia.decide(50004, None) == FOCUS_EDIT       # 地址栏 / <input>
+
+    # 17d) 球上文字的自适应：放得下就整段、放不下才截断（纯函数，假测量）
+    def _meas(size, t):                       # 假字体：每个字符固定 size 宽
+        return len(t) * size
+    assert fit_text("已复制", 100, _meas) == (15, "已复制")
+    assert fit_text("x" * 200, 100, _meas)[1].endswith("…")
+    assert len(fit_text("x" * 200, 100, _meas)[1]) < 200
+    assert fit_text("", 100, _meas) == (15, "")
+    assert toast_ms(3) == TOAST_MS            # 「已复制」维持原来的 1.6s
+    assert TOAST_MS < toast_ms(40) <= TOAST_MS_MAX
+    assert toast_ms(10 ** 6) == TOAST_MS_MAX
+    assert toast_ms(10 ** 6, TOAST_MS_OK_MAX) == TOAST_MS_OK_MAX
+    assert toast_ms(3, TOAST_MS_OK_MAX) == TOAST_MS       # 短结果也不低于下限
+
+    facts = focus_facts()
+    out("focus selftest: fg=%s focus=%s state=%s"
+        % (facts.get("fg_cls") or "?", facts.get("focus_cls") or "-",
+           focus_target_state()[0]))
+
     out("selftest OK (%d chord events)" % len(ev))
     return 0
+
+
+def probe_focus():
+    """`--probe-focus`：打印当前前台窗口的焦点判定（排查「为什么这次没打字」）。"""
+    try:
+        sys.stdout.reconfigure(encoding="utf-8")     # 控制台是 GBK 时中文别乱码
+    except Exception:
+        pass
+    state, f = focus_target_state()
+    print("前台窗口类名 : %s" % (f.get("fg_cls") or "?"))
+    print("焦点控件类名 : %s" % (f.get("focus_cls") or "-"))
+    print("焦点控件句柄 : %s" % (f.get("focus") or 0))
+    print("caret 句柄   : %s（只用于日志，不参与判定）" % (f.get("caret") or 0))
+    print("UIA 判定     : %s%s" % (
+        f.get("uia") or "off",
+        "" if f.get("uia_ok") else "（UIA 没工作：%s）" % (f.get("uia_err") or "未启用")))
+    if f.get("uia_ct"):
+        print("UIA 焦点元素 : ControlType=%s(%s) class=%r name=%r"
+              % (f["uia_ct"],
+                 _uia.CT_NAMES.get(f["uia_ct"], "?") if _uia else "?",
+                 f.get("uia_cls") or "", f.get("uia_name") or ""))
+    print("判定         : %s" % state)
+    print("本轮行为     : %s" % (
+        "复制进剪贴板 + 悬浮球显示「%s 识别结果」" % TOAST_TEXT
+        if f.get("copy") else
+        "注入到焦点控件，悬浮球显示识别结果预览"))
+    return 0
+
+
+def copy_text_probe(text):
+    """`--copy-text`：写剪贴板并读回校验（验兜底复制的通路，不涉及录音）。"""
+    try:
+        sys.stdout.reconfigure(encoding="utf-8")
+    except Exception:
+        pass
+    ok = set_clipboard_text(text)
+    back = get_clipboard_text() if ok else None
+    print("set_clipboard_text -> %s" % ok)
+    print("读回            -> %r" % back)
+    good = ok and back == text
+    print("结论            -> %s" % ("OK（剪贴板通路正常）" if good else "FAILED"))
+    return 0 if good else 1
 
 
 def main():
     args = sys.argv[1:]
     if args and args[0] == "--selftest":
         return selftest()
+    if args and args[0] == "--probe-focus":
+        return probe_focus()
+    if args and args[0] == "--copy-text":
+        return copy_text_probe(args[1] if len(args) > 1 else "语音输入测试")
 
     simulate = bool(args and args[0] == "--simulate")
     opaque = bool(args and args[0] == "--debug-opaque")
     canvas = "--canvas" in args           # 强制 Tk 画布（做渲染对比用）
-    # simulate/opaque 是 no_send 短命进程，豁免单实例锁，可与常驻实例并存测试
-    if not simulate and not opaque and not single_instance():
+    # --toast 是「只弹一条提示」的短命进程，同样豁免单实例锁
+    toast = None
+    if "--toast" in args:
+        i = args.index("--toast")
+        toast = args[i + 1] if len(args) > i + 1 and not args[i + 1].startswith(
+            "-") else TOAST_TEXT
+    # simulate/opaque/toast 是 no_send 短命进程，豁免单实例锁，可与常驻实例并存测试
+    if not simulate and not opaque and toast is None and not single_instance():
         out("another instance running, exit")
         return 0
 
-    ov = Overlay(no_send=simulate or opaque, opaque=opaque,
+    ov = Overlay(no_send=simulate or opaque or toast is not None, opaque=opaque,
                  force_canvas=canvas)
+    # 打包成 exe 后，规则表是靠 PyInstaller 一起塞进单文件的；万一没塞进去，
+    # FOCUS_OK 会是 False（功能静默退化成「永远注入」）。启动就写一行日志，
+    # 免得以后对着 exe 排查半天。
+    out("focus module: %s" % ("ok" if FOCUS_OK else
+                              "MISSING -> 兜底复制不可用（打包漏了 voice_overlay_focus）"))
+    out("uia module: %s" % ("ok" if UIA_OK else
+                            "MISSING -> 浏览器空白页面仍会被判成输入框（打包漏了 voice_overlay_uia）"))
     stop_evt = threading.Event()
     det = ChordDetector(ov.on_chord, arm=ARM_DELAY, keys=read_hotkey())
     out("hotkey=%s" % format_hotkey(det.keys))
+    # 启动即写一份设备清单给设置窗口；顺手清掉上次残留的刷新请求
+    # （不清的话这次启动写一份、下一轮心跳又写一份，白做一次）。
+    try:
+        os.remove(MIC_LIST_REQUEST)
+    except OSError:
+        pass
+    threading.Thread(target=write_mic_list, daemon=True).start()
     threading.Thread(target=poll_main, args=(det, stop_evt,
                                              make_hotkey_reloader(det)),
                      daemon=True).start()
@@ -2691,13 +4000,19 @@ def main():
     elif opaque:
         ov.root.after(300, ov.request_toggle)   # 只开录音态，保持显示
         ov.root.after(8000, ov.root.destroy)
+    elif toast is not None:
+        # 只弹一次提示：用来肉眼验收提示的样子（不录音、不碰剪贴板）。
+        # 传多长的文字就撑多宽、停多久，和真机上那条路径完全一致。
+        ov.root.after(300, lambda: ov._toast(toast))
+        ov.root.after(300 + toast_ms(len(toast)) + 1000, ov.root.destroy)
 
     def on_destroy(event):
         if str(event.widget) == ".":
             stop_evt.set()
 
     ov.root.bind("<Destroy>", on_destroy)
-    out("overlay started%s" % (" (simulate)" if simulate else ""))
+    out("overlay started%s" % (" (simulate)" if simulate else
+                               (" (toast)" if toast is not None else "")))
     ov.run()
     stop_evt.set()
     ov.view.destroy()                 # 释放分层窗口（DIB/DC 一并回收）

@@ -1,4 +1,4 @@
-﻿// Ui.cs —— Apple 浅色主题 + 自绘控件（与原 PowerShell 版样式逐一对应）
+// Ui.cs —— Apple 浅色主题 + 自绘控件（与原 PowerShell 版样式逐一对应）
 //
 // 颜色/字体/画刷全部只建一次（自绘每帧 New 画刷是当年卡顿的主因）；
 // 圆角路径按尺寸缓存；所有自绘控件开双缓冲。
@@ -49,6 +49,15 @@ internal static class Theme
     public static readonly Color OkText = Color.FromArgb(34, 148, 66);          // 状态条「成功」绿
     public static readonly Color TabHoverBg = Color.FromArgb(235, 235, 240);    // 标签悬停底色
     public static readonly Color Warn = Color.FromArgb(255, 149, 0);            // 警示橙（备用）
+
+    // ---- [0.2.34 圆角/层次统一] ----
+    // 原来三套圆角各说各话：卡片 12、输入框 7、按钮 Height/2（高 30 → 15，成了胶囊）。
+    //   同一行里「输入框 7 + 按钮 15」并排，看着就是不搭。
+    //   现在统一到一个半径阶梯：卡片 > 输入框/按钮。
+    public const int RadiusCard = 10;   // 卡片（大面积，圆角适中）
+    public const int RadiusCtl = 8;     // 输入框 / 按钮 / 徽章（小控件）
+    public static readonly Color CardStroke = Color.FromArgb(222, 222, 228);   // 卡片描边（比 Stroke 深一档，边界看得见）
+    public static readonly Color CardShadow = Color.FromArgb(238, 238, 242);   // 卡片底部 1px 投影
 
     // ---- 字体 ----
     public static readonly Font Ui = new Font("Microsoft YaHei UI", 9f);
@@ -231,8 +240,11 @@ internal class AppleButton : Button
             int bh = Height - 1;
             if (bw >= 2 && bh >= 2)
             {
+                // [0.2.34 圆角统一] 原来是 Math.Floor(Height/2.0) —— 高 30 时半径 15，
+                //   正好是胶囊（椭圆）。同一行的输入框却是 7 的圆角，两个控件并排
+                //   一个椭圆一个方角，看着很别扭。现在统一成 RadiusCtl(8)。
                 GraphicsPath path = Theme.RoundPath(new Rectangle(0, 0, bw, bh),
-                    Math.Floor(Height / 2.0));
+                    Theme.RadiusCtl);
                 g.FillPath(brush, path);
                 if (pen != null) g.DrawPath(pen, path);
                 TextRenderer.DrawText(g, Text, Font, ClientRectangle, tc, Theme.TfCenter);
@@ -268,10 +280,23 @@ internal class AppleButton : Button
 internal class AppleCard : Panel
 {
     private readonly Label titleLabel;
+    private readonly Color strokeColor;
+    private readonly Color shadowColor;
 
     public AppleCard(string title, Color bg, int radius)
+        : this(title, bg, Theme.CardStroke, radius) { }
+
+    // [0.2.34 圆角/描边统一] 卡片按「白卡片 + 清晰边界」重做：
+    //   原来卡片是纯白、页面是浅灰（245,245,247），中间只有一条几乎看不见的
+    //   Stroke(227,227,232) 细边 —— 于是白卡片压在灰页面上就是一块**硬邦邦的
+    //   白色直角矩形**，用户看到的就是「按钮外面有一圈浅浅的矩形框」。
+    //   现在：描边加深一档（CardStroke），并在卡片底部垫一层 1px 的极淡投影，
+    //   卡片才真正「浮」在页面上，而不是「贴」上去。
+    public AppleCard(string title, Color bg, Color stroke, int radius)
     {
         BackColor = bg;
+        strokeColor = stroke;
+        shadowColor = Theme.CardShadow;
         Radius = radius;
         Theme.DoubleBuffer(this);
         if (title != null && title.Length > 0)
@@ -302,9 +327,14 @@ internal class AppleCard : Panel
             int bh = Height - 1;
             if (bw < 4 || bh < 4) return;
             e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
+            // 1px 投影垫底：只画下沿与左右下角，让卡片有「浮起」的层次。
+            //   不画整圈 —— 整圈灰边在浅色页面上反而像脏边。
+            GraphicsPath shadow = Theme.RoundPath(new Rectangle(0, 1, bw, bh), Radius);
+            using (Pen sp = new Pen(shadowColor, 1f)) e.Graphics.DrawPath(sp, shadow);
+            // 卡片本体：白底 + 加深一档的描边（边界要看得见，但不能喧宾夺主）
             GraphicsPath path = Theme.RoundPath(new Rectangle(0, 0, bw, bh), Radius);
             e.Graphics.FillPath(Theme.BrWhite, path);
-            e.Graphics.DrawPath(Theme.PenStroke, path);
+            using (Pen p = new Pen(strokeColor, 1f)) e.Graphics.DrawPath(p, path);
         }
         catch { }
     }
@@ -376,7 +406,7 @@ internal class AppleField : Panel
             int bh = Height - 1;
             if (bw < 4 || bh < 4) return;
             e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
-            GraphicsPath path = Theme.RoundPath(new Rectangle(0, 0, bw, bh), 7);
+            GraphicsPath path = Theme.RoundPath(new Rectangle(0, 0, bw, bh), Theme.RadiusCtl);
             Brush fill = Theme.BrWhite;
             TextBox tb = inner as TextBox;
             if (tb != null && tb.ReadOnly) fill = Theme.BrBtnH;

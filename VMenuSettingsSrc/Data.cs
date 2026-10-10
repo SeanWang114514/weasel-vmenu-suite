@@ -9,6 +9,7 @@
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.Globalization;
 using System.IO;
 using System.Text;
 using System.Text.RegularExpressions;
@@ -51,7 +52,13 @@ internal static class Data
     public const int MaxPage = 50;
     public const int Step = 10;
     public const int MiDefault = 30;
-    public const int MiMin = 10;
+    // ★ [卡顿修复 · 2026-10-06] 下限 10 → 20，与 lua 侧 vmenu_core.MISINPUT_MIN 保持一致。
+    //   10ms 是**键盘自动重复**的量级（按住退格/方向键时 Windows 可低至 ~31ms，
+    //   键盘连击也常在 10ms 内），定在 10ms 会把真实输入静默吃掉 ——
+    //   表现就是「打字丢字 / 明显卡顿」。20ms 仍远低于人类最快连续按键（≈100ms），
+    //   防误触「拦抖动与手滑」的本意完全保留，但不再误伤键盘重复。
+    //   注意：这个值上限写死在 Data.cs，lua 侧也会再钳一次（双保险）。
+    public const int MiMin = 20;
     public const int MiMax = 200;
     public const long DefaultWeight = 100000;
 
@@ -168,7 +175,9 @@ internal static class Data
 
     private static bool FlagOn(string v)
     {
-        return v != null && Regex.IsMatch(v, "^(1|true|on|yes)$");
+        // 忽略大小写：这几个开关的配置文件是给人手改的，"True" / "ON" 也得认
+        return v != null && Regex.IsMatch(v, "^(1|true|on|yes)$",
+                                         RegexOptions.IgnoreCase);
     }
 
     // ---- vmenu-settings.txt（剪贴板页数 + 防误触）----
@@ -275,7 +284,32 @@ internal static class Data
     public static int AsrThreads = DefaultAsrThreads;
     public static string AsrDevice = "auto";      // auto | cpu | gpu
 
+    // 音频输入设备（麦克风）。存「索引|名字」，悬浮球按名字优先解析 ——
+    // 设备索引会随 USB 插拔 / 蓝牙耳机开关而漂移，写死索引下次开机就指错设备。
+    // "default" = 系统默认设备（老行为）。
+    public static string AsrInputDevice = "default";
+
+    // 「替换预览」时长（秒）：识别出结果后，退格删掉流式预览再补发正文。
+    // 上下限与 voice-overlay.py 的 RECONCILE_SECS_MIN/MAX 一致：悬浮球每次替换
+    // 前都读一次，所以改完**下一次识别即生效**，不用重启悬浮球。
+    // ★ 0.0 是合法值 = 不铺时长、立刻替换（悬浮球走「快通道」：退格直接投给目标
+    //   焦点窗口，没有每格 24ms 的可靠投递下限，所以再短也不会丢退格）。
+    // ★ 默认就是 0.0：快通道一口气投完（实测 1~3ms）且一格不丢，「最快」和
+    //   「删得最干净」在同一边 —— 需求 0.2.39「调快替换的时间，但一个字都
+    //   不能少删」的落点。调大只是把这段节奏铺开给人看，不影响删多少。
+    public static double ReconcileSecs = DefaultReconcileSecs;
+
+    // 快通道开关：退格用「直接投给目标焦点窗口的键消息」而不是真实键盘注入。
+    // 快得多（46 格 1~10ms vs 1.5s）且**不会丢退格**（消息进队列，不经过会合并
+    // down/up 的 RIT）。只有极少数程序不吃投递键消息（UWP / XAML 岛，悬浮球自己
+    // 有类名黑名单会自动退回），或用户就是想用真实键盘时才需要关掉。
+    public static bool FastDelete = DefaultFastDelete;
+
     public const int DefaultAsrThreads = 4;
+    public const double DefaultReconcileSecs = 0.0;
+    public const double ReconcileSecsMin = 0.0;
+    public const double ReconcileSecsMax = 3.0;
+    public const bool DefaultFastDelete = true;
 
     /// <summary>物理核数（不是逻辑核）：llama.cpp 开线程超过物理核只会空转自旋，越开越慢。</summary>
     public static int PhysCores()
@@ -301,6 +335,9 @@ internal static class Data
         Hotkey = HotkeyKit.Default;
         AsrThreads = DefaultAsrThreads;
         AsrDevice = "auto";
+        AsrInputDevice = "default";
+        ReconcileSecs = DefaultReconcileSecs;
+        FastDelete = DefaultFastDelete;
         foreach (string line in ReadAllLines(VoiceSetPath))
         {
             Match m = Regex.Match(line, @"^\s*punct_to_space\s*=\s*(\S+)");
@@ -326,17 +363,41 @@ internal static class Data
                 string v = m.Groups[1].Value.Trim().ToLowerInvariant();
                 if (v == "auto" || v == "cpu" || v == "gpu") AsrDevice = v;
             }
+            // 值可能含空格（设备名「麦克风阵列 (Realtek(R) Audio)」），所以不能用 \S+
+            m = Regex.Match(line, @"^\s*asr_input_device\s*=\s*(.+?)\s*$");
+            if (m.Success) AsrInputDevice = m.Groups[1].Value.Trim();
+            m = Regex.Match(line, @"^\s*reconcile_secs\s*=\s*(\S+)");
+            if (m.Success)
+            {
+                // 只认 0.0~3.0 秒：越界/写坏退回默认。0 = 立刻替换（快通道没有
+                // 每格下限，见 voice-overlay.py 的 RECONCILE_SECS_MIN）。用不变
+                // 文化解析，免得德语等区域把「1.0」当千分位。
+                double v;
+                if (double.TryParse(m.Groups[1].Value, NumberStyles.Float,
+                                    CultureInfo.InvariantCulture, out v)
+                    && v >= ReconcileSecsMin && v <= ReconcileSecsMax)
+                    ReconcileSecs = v;
+            }
+            m = Regex.Match(line, @"^\s*fast_delete\s*=\s*(\S+)");
+            if (m.Success) FastDelete = FlagOn(m.Groups[1].Value);
         }
         HotkeyRecPid = 0;   // 启动时上一轮录制必然已经死了，pid 不认旧值
     }
 
     public static void SaveVoiceSettings()
     {
+        // ★ 整文件重写：任何新字段都必须在这里补一行，否则用户在设置窗口动一下
+        //   别的开关就会把它抹掉（历史事故：asr_threads 被静默清空）。
+        // 秒数用固定 "0.####" 且不受区域影响：Python 侧 float() 只认小数点。
         string txt = "# 语音输入设置（voice-overlay.py 读取）\n" +
             "punct_to_space=" + (PunctSpace ? "true" : "false") + "\n" +
             "hotkey=" + Hotkey + "\n" +
             "asr_threads=" + AsrThreads + "\n" +
-            "asr_device=" + AsrDevice + "\n";
+            "asr_device=" + AsrDevice + "\n" +
+            "asr_input_device=" + AsrInputDevice + "\n" +
+            "reconcile_secs=" + ReconcileSecs.ToString("0.####",
+                CultureInfo.InvariantCulture) + "\n" +
+            "fast_delete=" + (FastDelete ? "true" : "false") + "\n";
         if (HotkeyRecPid > 0)
         {
             // 录制中：让悬浮球暂停热键检测（它会查这个 pid 是否还活着）

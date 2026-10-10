@@ -1,4 +1,4 @@
-﻿// PagesClipFav.cs —— 剪贴板历史页 / 常用语页（控件、事件、布局、刷新）
+// PagesClipFav.cs —— 剪贴板历史页 / 常用语页（控件、事件、布局、刷新）
 
 using System;
 using System.Collections.Generic;
@@ -42,7 +42,7 @@ internal partial class MainForm : Form
         clipList.Columns.Add("序", 52);
         clipList.Columns.Add("剪贴板内容（最新在最上面）", 720);
         clipHeader = new ListHeader(clipList, "序", "剪贴板内容（最新在最上面）");
-        clipCard = new AppleCard("", Theme.Bg, 12);
+        clipCard = new AppleCard("", Theme.Bg, Theme.RadiusCard);
 
         // 颜色可视化：删除=红描边，清空=实心红（破坏性一眼可辨）
         btnClipCopy = AppleButton.Make("复制到剪贴板", "Plain", 150, 32);
@@ -89,7 +89,7 @@ internal partial class MainForm : Form
         favList.Columns.Add("内容", 420);
         favList.Columns.Add("编码", 280);
         favHeader = new ListHeader(favList, "序", "内容", "编码");
-        favCard = new AppleCard("", Theme.Bg, 12);
+        favCard = new AppleCard("", Theme.Bg, Theme.RadiusCard);
 
         btnFavAdd = AppleButton.Make("添加", "Plain", 150, 32);
         btnFavEdit = AppleButton.Make("修改选中", "Plain", 150, 32);

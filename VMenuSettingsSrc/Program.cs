@@ -1,10 +1,10 @@
-﻿// Program.cs —— VMenuSettings.exe 入口
+// Program.cs —— VMenuSettings.exe 入口
 //
 // 「单独的 exe」改造（2026-09-25）：整个设置窗口不再依赖 PowerShell ——
 // WinForms 原生 C# 编译（.NET Framework 4.x 自带 csc，无需安装任何运行时）。
 // 打开速度：进程常驻 + 窗口预建在屏幕外；v→1 只是把已建好的窗口 Show 出来。
 //
-//   VMenuSettings.exe [--rime <dir>] [--show] [--tab N] [--dialogtest] [--hotkeytest]
+//   VMenuSettings.exe [--rime <dir>] [--show] [--tab N] [--dialogtest] [--hotkeytest] [--pacetest]
 //
 // 协议与旧版 PowerShell 完全一致：
 //   互斥体 RimeVMenuSettingsGui（单实例）
@@ -25,6 +25,7 @@ internal static class Program
         int tab = -1;
         bool dialogTest = false;
         bool hotkeyTest = false;
+        bool paceTest = false;
 
         for (int i = 0; i < args.Length; i++)
         {
@@ -50,6 +51,10 @@ internal static class Program
             {
                 hotkeyTest = true;
             }
+            else if (lower == "--pacetest" || lower == "-pacetest")
+            {
+                paceTest = true;
+            }
             else if (lower == "-h" || lower == "--help" || lower == "/?")
             {
                 return 0;
@@ -59,6 +64,9 @@ internal static class Program
         // 自检模式（--hotkeytest）是秒进秒出的无窗口跑法，**不参与单实例互斥**
         // （对应 PowerShell 版的 -HotkeyTest；那边的入口继续可用，互不影响）。
         if (hotkeyTest) return HotkeyKit.RunSelfTest();
+        // --pacetest：替换预览速度的刻度/解析自检，同样无窗口、不占互斥体。
+        // 窗口标题是 winexe，本模式没有控制台；重定向到文件再读（沿用既有做法）。
+        if (paceTest) return MainForm.RunPaceSelfTest();
 
         // 默认目录不可用时退回注册表里登记的 RimeUserDir
         rimeDir = Data.ResolveRimeDir(rimeDir);
