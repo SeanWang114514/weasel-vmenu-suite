@@ -1,7 +1,6 @@
 # 这是个 Windows-only 的套件，换行符必须锁死：
 # 发布的 .bat / .ps1 必须是 CRLF，二进制不能被当成文本处理。
 * text=auto
-
 *.bat  text eol=crlf
 *.cmd  text eol=crlf
 *.ps1  text eol=crlf
