@@ -124,6 +124,8 @@ STREAM_MIN_AUDIO = 0.6                   # 累计音频达到这么多秒才开�
 STREAM_MIN_DELTA = 1                     # 增量至少这么多字符才值得上屏
 STREAM_TAIL_RATIO = 0.08                 # 长音频降频：间隔 = max(0.4, 0.08*时长)
 STREAM_INTERVAL_MAX = 1.0                # 降频后的间隔上限（秒）
+STREAM_POLL_INTERVAL = 0.08               # 无新音频时的轮询间隔，避免后台空转
+ASR_CHECK_INTERVAL = 0.5                  # 服务未就绪时的健康检查节流
 ABORT_RETRACT_WAIT = 10.0                # abort 撤回时等修饰键松开的上限（秒）
 
 # ---- 标点转空格开关（设置窗口「设置与缓存」页可切换，改完下一次识别即生效）----
@@ -1976,14 +1978,22 @@ class Overlay:
     # ---- 流式识别：边说边把增量打进目标框 ----
     def _stream_loop(self, gen):
         last_bytes, last_run = 0, 0.0
+        next_health = 0.0
+        server_ready = False
         prev = ""                          # 上一轮的识别文本（做双轮稳定）
         while True:
-            time.sleep(0.05)
+            time.sleep(STREAM_POLL_INTERVAL)
             with self._emit_lock:
                 if self.stream_halt or gen != self.rec_gen:
                     return                # 录音结束/中止/新一轮 -> 本线程退出
-            if not asr_alive(0.3):
-                continue                  # server 还没起来，等它
+            now = time.time()
+            if not server_ready:
+                if now < next_health:
+                    continue
+                server_ready = asr_alive(0.3)
+                next_health = now + ASR_CHECK_INTERVAL
+                if not server_ready:
+                    continue                  # server 还没起来，按节奏重试
             snapshot = list(self.frames)  # 录音线程在追加，先快照
             if not snapshot:
                 continue
