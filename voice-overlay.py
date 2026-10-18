@@ -38,6 +38,7 @@
   看「已复制」提示: python  voice-overlay.py --toast        （弹出提示，2.6s 后退出）
   验剪贴板通路    : python  voice-overlay.py --copy-text "测试"（写入并读回校验）
 """
+import collections
 import ctypes
 import ctypes.wintypes as wt
 import io
@@ -154,8 +155,6 @@ STREAM_MIN_AUDIO = 0.6                   # 累计音频达到这么多秒才开�
 STREAM_MIN_DELTA = 1                     # 增量至少这么多字符才值得上屏
 STREAM_TAIL_RATIO = 0.08                 # 长音频降频：间隔 = max(0.4, 0.08*时长)
 STREAM_INTERVAL_MAX = 1.0                # 降频后的间隔上限（秒）
-STREAM_POLL_INTERVAL = 0.08               # 无新音频时的轮询间隔，避免后台空转
-ASR_CHECK_INTERVAL = 0.5                  # 服务未就绪时的健康检查节流
 ABORT_RETRACT_WAIT = 10.0                # abort 撤回时等修饰键松开的上限（秒）
 
 # ---- 退格投递节奏（实测出来的硬参数，别随手调小）----
@@ -717,14 +716,13 @@ INK = "#1C1C1E"                           # Apple label（提示文字颜色）
 TOAST_TEXT = "已复制"                      # 提示文字（--toast 可覆盖）
 TOAST_MS = 1600                           # 提示最短停留（毫秒）
 TOAST_MS_MAX = 5000                       # 复制兜底的上限：字没上屏，必须留够阅读时间
-TOAST_MS_OK_MAX = 2500                    # 已上屏预览的上限：输入框里本来就有，短一点
+TOAST_MS_OK_MAX = 2500                    # 保留给兼容调用；输入框成功路径使用 TOAST_MS
 TOAST_FONT_SIZES = (15, 14, 13, 12, 11)   # 依次试到放得下为止（逻辑像素）
 
-# ---- 识别结果预览：把识别出来的文字也显示在悬浮球上 ----
-# 只显示「已复制」的话，用户既看不到识别成了什么，也不知道自己说的是否被听懂。
-# 所以识别完把结果本身画在胶囊上：短就原位显示，长就把胶囊**横向撑开**（还是
-# 同一个胶囊、同一个徽章，只是变宽），超过 TEXT_MAX_W 就用省略号截断。
-TEXT_MAX_W = 560.0                        # 胶囊本体的最大宽度（逻辑像素）
+# ---- 固定提示的文字布局 ----
+# 识别结果不再绘制到悬浮球：输入框成功时只显示绿色对勾，非输入框时只显示
+# 「已复制」。保留这套布局供 `--toast` 手工验收固定提示时使用。
+TEXT_MAX_W = 560.0                        # 固定提示胶囊的最大宽度（逻辑像素）
 TEXT_PAD_R = 8                            # 文字右侧留白（和 _text 里保持一致）
 
 
@@ -765,7 +763,7 @@ def toast_ms(n, cap=TOAST_MS_MAX):
 
     纯函数，单测直接钉住上下界。「已复制」3 个字 -> 还是原来的 1.6s。
     `cap` 区分两种提示：复制兜底要久（字没上屏，球是唯一的展示），
-    已上屏预览可以短（输入框里本来就有）。
+    固定提示只显示很短的状态文字；输入框成功路径不绘制识别全文。
     """
     return int(max(TOAST_MS, min(TOAST_MS + (n - 3) * 90, cap)))
 
@@ -1258,10 +1256,14 @@ CFG_POLL_S = 0.4                       # 配置热更新 / 录制暂停的检查
 SCAN_SKIP = {0x10, 0x11, 0x12, 0xE7}
 
 
-def _phys_all_down(cache, groups):
-    """按轮询缓存判断「每组都有键真的按着」（组内任一两侧即可）。"""
+def _phys_all_down(cache, groups, extra=()):
+    """按轮询缓存判断「每组都有键真的按着」（组内任一两侧即可）。
+
+    extra：被 WinKeyGate 钩子吞掉的 VK —— 它们轮询永远读不到（键没进系统
+    队列），但钩子只在真按下时才喂事件，所以这里直接当成按下。
+    """
     for g in groups:
-        if not any(cache.get(vk, False) for vk in g):
+        if not any(cache.get(vk, False) or (vk in extra) for vk in g):
             return False
     return bool(groups)
 
@@ -1312,7 +1314,12 @@ def poll_main(detector, stop_evt, on_reload=None):
                 stop_evt.wait(POLL_MS / 1000.0)
                 continue
 
+            # 被 WinKeyGate 吞掉的键（Win 系）轮询读不到，事件由钩子直接喂，
+            # 这里必须跳过，否则会立刻用 d=False 把刚按下的状态覆盖掉。
+            owned = hook_owned_vks()
             for vk in detector.poll_keys():
+                if vk in owned:
+                    continue
                 d = down(vk)
                 if last.get(vk, False) != d:
                     detector.on_key(vk, d)
@@ -1320,8 +1327,9 @@ def poll_main(detector, stop_evt, on_reload=None):
             # 第三键扫描只在「快捷键的键**物理上**确实都按着」时跑：--simulate
             # 是用合成状态驱动的，此时真实按键不能算第三键（否则测试期间用户
             # 敲的字会把录音打断）。线上两种状态本来永远一致，这里是零开销。
-            if detector.needs_scan() and _phys_all_down(last, detector.groups):
-                skip = detector.scan_skip()
+            if detector.needs_scan() and _phys_all_down(
+                    last, detector.groups, owned):
+                skip = detector.scan_skip() | owned
                 for vk in range(8, 256):
                     if vk in skip:
                         continue
@@ -1332,6 +1340,366 @@ def poll_main(detector, stop_evt, on_reload=None):
     except Exception as e:
         out("poller error: %r" % (e,))
     out("keyboard poller stopped")
+
+
+# ------------------------------------------- Win 键抢占（防微信输入法吞掉热键）
+# 微信输入法 3.0（wetype_update.exe）用 WH_KEYBOARD_LL 把 **Ctrl+Win** 整段吞掉
+# 去开它自己的「语音输入」面板：键进不了系统队列，GetAsyncKeyState 也看不到，
+# 本程序的 20ms 轮询于是完全失效（现象：按住没反应，弹的是微信的语音面板）。
+# 修法：用同层钩子把 Win 键抢回来 —— 只在「快捷键需要 Win + 其余修饰键此刻
+# 都按着」时拦下 Win 的按下/抬起，并直接喂给 ChordDetector；其余按键原样放行。
+#
+# 三条纪律（都是踩过的坑，改这里之前先读一遍）：
+#   1. 钩子必须跑在**自带消息循环**的线程上：WH_KEYBOARD_LL 不泵消息就永不回调，
+#      还会把整机输入卡到 LowLevelHooksTimeout（现象：全系统无法输入）。
+#   2. ctypes 必须显式声明 argtypes/restype：x64 下 CallNextHookEx 的 lParam 若被
+#      截成 32 位，会污染下游钩子链（早先版本就是这样把 Win 键弄死的）。
+#   3. 钩子回调里绝不做 IO、不拿锁、不打日志：只读缓存 + GetAsyncKeyState。
+WH_KEYBOARD_LL = 13
+WM_KEYDOWN, WM_KEYUP = 0x0100, 0x0101
+WM_SYSKEYDOWN, WM_SYSKEYUP = 0x0104, 0x0105
+WM_QUIT = 0x0012
+QS_ALLINPUT = 0x04FF
+PM_REMOVE = 0x0001
+# 重装周期：Windows 的低级键盘钩子链是「后装的先被调用」，重装一次就排到链首，
+# 才能先于微信输入法的钩子看到 Win 键。微信输入法自己也会重装（切窗口、关面板
+# 时都会），1.5s 太慢 —— 实测真实按键时会漏，两个语音面板同时弹出来。0.25s
+# 的重装成本可以忽略（SetWindowsHookEx 是微秒级，且重装不产生空窗期）。
+REARM_S = 0.25
+BEAT_S = 300.0                   # 诊断心跳：把钩子计数写进日志（seen/fed）
+WIN_VK_SET = frozenset(WIN_VKS)
+
+
+class KBDLLHOOKSTRUCT(ctypes.Structure):
+    _fields_ = [("vkCode", wt.DWORD), ("scanCode", wt.DWORD),
+                ("flags", wt.DWORD), ("time", wt.DWORD),
+                ("dwExtraInfo", ctypes.c_size_t)]
+
+
+class _MSG(ctypes.Structure):
+    _fields_ = [("hwnd", wt.HWND), ("message", wt.UINT),
+                ("wParam", ctypes.c_size_t), ("lParam", ctypes.c_ssize_t),
+                ("time", wt.DWORD), ("pt", wt.POINT)]
+
+
+_HOOK_GATE = None                # 全局单例；poll_main 读它判断哪些 VK 归钩子管
+
+
+def hook_owned_vks():
+    """钩子自己消化的 VK（被吞掉的键轮询看不到，必须跳过）。"""
+    return _HOOK_GATE.owned() if _HOOK_GATE is not None else frozenset()
+
+
+class WinKeyGate:
+    """把 Win 键从微信输入法的低级键盘钩子手里抢回来。
+
+    只在两种条件下拦键，别的一律放行：
+      * 快捷键里含 win（本机就是 ctrl+win）；
+      * 其余每一组修饰键此刻都按着（ctrl 按着才拦 Win）。
+    拦下的 Win 事件直接喂给 ChordDetector —— 因为被吞掉的键轮询永远看不到，
+    所以这两件事必须在钩子里一起做。副作用：按住 Ctrl 时 Win 组合键
+    （Win+Ctrl+D / Win+Ctrl+←）会失效，这正是「Ctrl+Win 归语音输入」的代价。
+    """
+
+    def __init__(self, detector, stop_evt, log=out):
+        self.detector = detector
+        self.stop_evt = stop_evt
+        self.log = log
+        self.hook = None
+        self.hooks = []              # 历史句柄：换钩子时先装新的、再卸旧的，不留空窗
+        self.thread = None
+        self.tid = 0
+        self.swallowed = set()
+        self._track = {}             # VK -> 吞下时刻（只在钩子里写，释放时打一行时长）
+        self.seq = collections.deque(maxlen=64)   # 钩子看到的事件序列（诊断）
+        self.seen = 0                # 钩子收到的 Win 事件数（诊断用，只加计数不做 IO）
+        self.fed = 0                 # 其中真正喂给检测器的数量
+        self.paused = False          # 设置窗口正在录制新快捷键
+        self._proc_ref = None
+        self._logged_ok = False
+        self._logged_fail = False
+        self._user32 = ctypes.windll.user32
+        self._k32 = ctypes.windll.kernel32
+        self._k32.GetModuleHandleW.argtypes = [wt.LPCWSTR]
+        self._k32.GetModuleHandleW.restype = ctypes.c_void_p
+
+    # ---- 判断 ----
+    def wanted(self):
+        return any(k == "win" for k in self.detector.keys)
+
+    def owned(self):
+        return WIN_VK_SET if self.hook else frozenset()
+
+    def _others_down(self):
+        """除 Win 那组之外，其余每组是否都有键按着（ctrl / alt ...）。"""
+        groups = [g for g in self.detector.groups
+                  if not any(vk in WIN_VK_SET for vk in g)]
+        if not groups:
+            return False
+        gsk = self._user32.GetAsyncKeyState
+        for g in groups:
+            if not any(gsk(vk) & 0x8000 for vk in g):
+                return False
+        return True
+
+    # ---- 钩子回调（必须极快）----
+    def _proc(self, ncode, wparam, lparam):
+        try:
+            if ncode == 0 and not self.paused:
+                kb = ctypes.cast(lparam, ctypes.POINTER(KBDLLHOOKSTRUCT)).contents
+                vk = int(kb.vkCode)
+                if vk in WIN_VK_SET:
+                    self.seen += 1
+                    self.seq.append(("W", vk, int(wparam), round(time.time() % 1000, 2)))
+                    if wparam in (WM_KEYDOWN, WM_SYSKEYDOWN):
+                        # 一律喂给检测器（保持原行为：先按 Win 再按 Ctrl 也算长按，
+                        # 此时 Win 已经放行给系统、开始菜单照旧会弹）。
+                        self.fed += 1
+                        self.detector.on_key(vk, True)
+                        if self._others_down():
+                            # 其余修饰键都按着 -> 这是「Ctrl+Win 语音键」，
+                            # 吞掉，别让 Win 键跑去开开始菜单。
+                            self.swallowed.add(vk)
+                            self._track[vk] = time.time()
+                            return 1
+                    elif wparam in (WM_KEYUP, WM_SYSKEYUP):
+                        self.detector.on_key(vk, False)
+                        if vk in self.swallowed:
+                            self.swallowed.discard(vk)
+                            t = self._track.pop(vk, None)
+                            if t:
+                                self.log("gate held Win %.2fs before release"
+                                         % (time.time() - t))
+                            return 1
+        except Exception:
+            pass                         # 钩子里绝不抛：抛了就是整机输入停摆
+        return self._user32.CallNextHookEx(None, ncode, wparam, lparam)
+
+    # ---- 安装 / 卸载（只在钩子线程里调）----
+    def _install(self):
+        u = self._user32
+        u.SetWindowsHookExW.argtypes = [ctypes.c_int, ctypes.c_void_p,
+                                        ctypes.c_void_p, wt.DWORD]
+        u.SetWindowsHookExW.restype = ctypes.c_void_p
+        u.CallNextHookEx.argtypes = [ctypes.c_void_p, ctypes.c_int,
+                                     ctypes.c_ssize_t, ctypes.c_ssize_t]
+        u.CallNextHookEx.restype = ctypes.c_ssize_t
+        u.UnhookWindowsHookEx.argtypes = [ctypes.c_void_p]
+        u.UnhookWindowsHookEx.restype = wt.BOOL
+        if self._proc_ref is None:
+            self._proc_ref = ctypes.WINFUNCTYPE(
+                ctypes.c_ssize_t, ctypes.c_int, ctypes.c_size_t,
+                ctypes.c_ssize_t)(self._proc)
+        # hMod 必须给真实模块句柄：全局 WH_KEYBOARD_LL 传 NULL 时
+        # SetWindowsHookExW 会「成功返回句柄」但回调永不触发（seen 恒 0）。
+        hmod = self._k32.GetModuleHandleW(None)   # 在 kernel32，不在 user32
+        new = u.SetWindowsHookExW(WH_KEYBOARD_LL, self._proc_ref, hmod, 0)
+        if new:
+            old = self.hook
+            self.hook = new
+            self.hooks.append(new)
+            # 先装后卸：新的已经在链首了，再把旧的摘掉。反过来的话（先卸再装）
+            # 从摘掉到装上的那一小段里，钩子链上没有我们 —— 正好按键落在那里，
+            # 微信输入法就把 Win 键拿走开了自己的语音面板。
+            if old:
+                try:
+                    u.UnhookWindowsHookEx(old)
+                except Exception:
+                    pass
+                if old in self.hooks:
+                    self.hooks.remove(old)
+            if not self._logged_ok:
+                self._logged_ok = True
+                self.log("win-key gate installed (preempts WeChat IME voice hotkey)")
+        elif not self._logged_fail:
+            self._logged_fail = True
+            self.log("win-key gate install FAILED err=%d -> poll only"
+                     % ctypes.get_last_error())
+
+    def _uninstall(self):
+        for h in self.hooks:
+            try:
+                self._user32.UnhookWindowsHookEx(h)
+            except Exception:
+                pass
+        self.hooks = []
+        self.hook = None
+        self.swallowed.clear()
+
+    def _rearm(self):
+        if self.paused and self.swallowed:
+            # 进了「设置窗口录制中」：把还按着的 Win 事件补一个抬起，否则检测器
+            # 会一直以为自己还在长按（录制期间没人会替它送 stop）。
+            for vk in list(self.swallowed):
+                self.swallowed.discard(vk)
+                try:
+                    self.detector.on_key(vk, False)
+                except Exception:
+                    pass
+        want = self.wanted()
+        if want:
+            self._install()              # 重装一次 = 排到钩子链首，压住微信输入法
+        elif self.hooks:
+            self._uninstall()
+
+    # ---- 线程：自带消息循环 ----
+    def _run(self):
+        u = self._user32
+        u.PeekMessageW.argtypes = [ctypes.POINTER(_MSG), ctypes.c_void_p,
+                                   ctypes.c_uint, ctypes.c_uint, ctypes.c_uint]
+        u.PeekMessageW.restype = wt.BOOL
+        u.TranslateMessage.argtypes = [ctypes.POINTER(_MSG)]
+        u.DispatchMessageW.argtypes = [ctypes.POINTER(_MSG)]
+        u.DispatchMessageW.restype = ctypes.c_ssize_t
+        u.MsgWaitForMultipleObjects.argtypes = [wt.DWORD, ctypes.c_void_p,
+                                                wt.BOOL, wt.DWORD, wt.DWORD]
+        u.MsgWaitForMultipleObjects.restype = wt.DWORD
+        self.tid = self._k32.GetCurrentThreadId()
+        msg = _MSG()
+        next_rearm = 0.0
+        next_beat = 0.0
+        try:
+            while not self.stop_evt.is_set():
+                now = time.time()
+                if now >= next_beat:
+                    next_beat = now + BEAT_S
+                    self.log("win-key gate alive hook=%s seen=%d fed=%d "
+                             "swallowed=%s paused=%s"
+                             % (bool(self.hook), self.seen, self.fed,
+                                sorted(self.swallowed), self.paused))
+
+                if now >= next_rearm:
+                    next_rearm = now + REARM_S
+                    try:
+                        self.paused = hotkey_recording_active()
+                    except Exception:
+                        self.paused = False
+                    self._rearm()
+                while u.PeekMessageW(ctypes.byref(msg), None, 0, 0, PM_REMOVE):
+                    if msg.message == WM_QUIT:
+                        self._uninstall()
+                        return
+                    u.TranslateMessage(ctypes.byref(msg))
+                    u.DispatchMessageW(ctypes.byref(msg))
+                u.MsgWaitForMultipleObjects(0, None, False, 50, QS_ALLINPUT)
+        except Exception as e:
+            self.log("win-key gate error: %r" % (e,))
+        finally:
+            self._uninstall()
+
+    def start(self):
+        global _HOOK_GATE
+        _HOOK_GATE = self
+        self.thread = threading.Thread(target=self._run, daemon=True)
+        self.thread.start()
+        return self
+
+
+# ------------------------------------------- 微信输入法语音面板：结果侧兜底抑制
+# 为什么光有 WinKeyGate 不够：它抢的是「钩子链首」这个**位置**，而微信输入法自己
+# 也会重装钩子（切输入法、关面板、心跳都会），这个位置是抢来的、不是稳的。真实
+# 按键时偶尔它先拿到 Win 键 —— 于是它的「语音输入」面板和我们的胶囊一起弹出来。
+# 这一层不看键，只看**结果**：本程序这次语音开始之后，屏幕上只要冒出微信输入法的
+# 语音面板就把它按下去。持续清理仅匹配的语音面板窗口，不碰设置页或输入法状态。
+WETYPE_MUTE_WINDOW_S = 12.0      # 保留旧配置兼容
+SW_HIDE = 0
+WM_CLOSE = 0x0010
+_VOICE_ACTIVE_UNTIL = 0.0
+
+
+def mark_voice_active(seconds=WETYPE_MUTE_WINDOW_S):
+    """保留兼容接口；WeType 语音面板现在由精确窗口匹配持续清理。"""
+    global _VOICE_ACTIVE_UNTIL
+    _VOICE_ACTIVE_UNTIL = time.time() + seconds
+
+
+def voice_recently_active():
+    return time.time() < _VOICE_ACTIVE_UNTIL
+
+
+class WeTypeVoiceMute:
+    """持续隐藏并请求关闭微信输入法专用的语音面板窗口。
+
+    仅匹配 wetype.flutter.setting + 精确标题「语音输入」；不触碰输入法列表、候选窗、
+    设置页、语音摘要窗或任何文字输入窗口。窗口管理器会保留已隐藏的 Flutter 窗口，
+    因此持续检查是必要的。
+    """
+
+    def __init__(self, stop_evt, interval=0.08, log=out):
+        self.stop_evt = stop_evt
+        self.interval = interval
+        self.log = log
+        self.thread = None
+        self.hits = 0
+        self.found = []
+        self._seen = set()
+        self._u = ctypes.windll.user32
+        self._prep()
+
+    def _prep(self):
+        u = self._u
+        u.EnumWindows.argtypes = [ctypes.c_void_p, ctypes.c_ssize_t]
+        u.EnumWindows.restype = wt.BOOL
+        u.GetClassNameW.argtypes = [wt.HWND, wt.LPWSTR, ctypes.c_int]
+        u.GetClassNameW.restype = ctypes.c_int
+        u.GetWindowTextW.argtypes = [wt.HWND, wt.LPWSTR, ctypes.c_int]
+        u.GetWindowTextW.restype = ctypes.c_int
+        u.ShowWindow.argtypes = [wt.HWND, ctypes.c_int]
+        u.ShowWindow.restype = wt.BOOL
+        u.PostMessageW.argtypes = [wt.HWND, wt.UINT, ctypes.c_size_t,
+                                   ctypes.c_ssize_t]
+        u.PostMessageW.restype = wt.BOOL
+        self._cb = ctypes.WINFUNCTYPE(ctypes.c_int, wt.HWND,
+                                      ctypes.c_ssize_t)(self._enum)
+
+    def _text(self, hwnd, fn, n=256):
+        buf = ctypes.create_unicode_buffer(n)
+        fn(wt.HWND(hwnd), buf, n)
+        return buf.value
+
+    def _enum(self, hwnd, lparam):
+        try:
+            cls = self._text(hwnd, self._u.GetClassNameW)
+            if cls.lower() != "wetype.flutter.setting":
+                return True
+            title = self._text(hwnd, self._u.GetWindowTextW)
+            # Hidden Flutter windows are retained by WeType and can be reused.
+            # Match only the actual voice panel; leave settings and text input alone.
+            if title != "语音输入":
+                return True
+            self.found.append((int(hwnd), cls, title))
+        except Exception:
+            pass
+        return True
+
+    def _scan(self):
+        self.found = []
+        try:
+            self._u.EnumWindows(self._cb, 0)
+        except Exception:
+            pass
+        return self.found
+
+    def _run(self):
+        while not self.stop_evt.is_set():
+            try:
+                for hwnd, cls, title in self._scan():
+                    self.hits += 1
+                    if hwnd not in self._seen:
+                        self._seen.add(hwnd)
+                        self.log("wetype voice panel suppressed hwnd=%d "
+                                 "cls=%s title=%s" % (hwnd, cls, title))
+                    self._u.ShowWindow(wt.HWND(hwnd), SW_HIDE)
+                    self._u.PostMessageW(wt.HWND(hwnd), WM_CLOSE, 0, 0)
+            except Exception as e:
+                self.log("wetype mute error: %r" % (e,))
+            self.stop_evt.wait(self.interval)
+
+    def start(self):
+        self.thread = threading.Thread(target=self._run, daemon=True)
+        self.thread.start()
+        return self
+
 
 
 # ----------------------------------------------------------- SendInput 上屏
@@ -2201,10 +2569,9 @@ class PillRenderer:
     def frame(self, glyph, badge, bars, ring, phase, text=None):
         """渲染一帧：返回物理像素尺寸的 RGBA 图。
 
-        `text` 非空时走**提示态**：不画声波条，改在原来声波条的位置画一行文字
-        （「已复制」或识别结果）。文字长的时候胶囊会**横向撑开**（`set_width`），
-        超过 TEXT_MAX_W 就截断成省略号。文字画在静态缓存层里（提示期间它不会
-        变），所以每帧的开销和平时一样。
+        `text` 非空时走**提示态**：不画声波条，改在原来声波条的位置画一行固定提示
+        （当前产品路径只使用「已复制」；输入框成功路径不传文字）。文字画在静态
+        缓存层里，所以每帧的开销和平时一样。
         """
         if text:
             self._tfont, self._tshown, dw = self.text_layout(text)
@@ -3044,22 +3411,14 @@ class Overlay:
             out("stream disabled: focus is not an edit box")
             return
         last_bytes, last_run = 0, 0.0
-        next_health = 0.0
-        server_ready = False
         prev = ""                          # 上一轮的识别文本（做双轮稳定）
         while True:
-            time.sleep(STREAM_POLL_INTERVAL)
+            time.sleep(0.05)
             with self._emit_lock:
                 if self.stream_halt or gen != self.rec_gen:
                     return                # 录音结束/中止/新一轮 -> 本线程退出
-            now = time.time()
-            if not server_ready:
-                if now < next_health:
-                    continue
-                server_ready = asr_alive(0.3)
-                next_health = now + ASR_CHECK_INTERVAL
-                if not server_ready:
-                    continue                  # server 还没起来，按节奏重试
+            if not asr_alive(0.3):
+                continue                  # server 还没起来，等它
             snapshot = list(self.frames)  # 录音线程在追加，先快照
             if not snapshot:
                 continue
@@ -3314,7 +3673,7 @@ class Overlay:
         # 复制兜底：球上**只**给「已复制」这四个字，不把识别内容一起画出来。
         # 用户明确要求「只要复制提示，具体内容不要显示」—— 内容已经在剪贴板里，
         # 他随手 Ctrl+V 就能看到；球上再复述一遍只是占地方。
-        # （正常注入那条路照旧预览识别结果，那是「打进去了什么」的凭据。）
+        # （正常注入那条路只显示绿色对勾，识别全文已经完整落进输入框。）
         if copied:
             self._toast(TOAST_TEXT)
             return
@@ -3335,6 +3694,9 @@ class Overlay:
 
     # ---- 长按事件入口（轮询线程投递，主线程消费） ----
     def on_chord(self, kind):
+        # 记一笔「本程序正在做语音输入」：微信输入法语音面板抑制器据此决定动手
+        # （只在我们的会话期间动手，别的时候不碰人家的窗口）。
+        mark_voice_active()
         self.q.put((kind, None))
 
     def _on_chord(self, kind):
@@ -3925,9 +4287,9 @@ def probe_focus():
                  f.get("uia_cls") or "", f.get("uia_name") or ""))
     print("判定         : %s" % state)
     print("本轮行为     : %s" % (
-        "复制进剪贴板 + 悬浮球显示「%s 识别结果」" % TOAST_TEXT
+        "复制完整识别内容到剪贴板 + 悬浮球只显示「%s」" % TOAST_TEXT
         if f.get("copy") else
-        "注入到焦点控件，悬浮球显示识别结果预览"))
+        "完整注入到焦点控件 + 悬浮球只显示绿色对勾"))
     return 0
 
 
@@ -3991,6 +4353,13 @@ def main():
     threading.Thread(target=poll_main, args=(det, stop_evt,
                                              make_hotkey_reloader(det)),
                      daemon=True).start()
+    # 快捷键里含 Win 时，把 Win 键从微信输入法的低级键盘钩子手里抢回来
+    # （否则它先吞掉 Ctrl+Win 去开自己的语音面板，本程序连键都看不到）。
+    # 不含 Win 的快捷键不需要，WinKeyGate 自己会判断要不要装。
+    gate = WinKeyGate(det, stop_evt).start()
+    # 结果侧兜底：钩子链首的位置是抢来的、不是稳的，微信输入法偶尔仍会先拿到
+    # Win 键并弹自己的语音面板。这里在本程序语音期间把它一露头就收掉。
+    mute = WeTypeVoiceMute(stop_evt).start()
 
     if simulate:
         # 自动化测试：模拟长按「配置里的键」-> 松开，完整走一轮（不上屏）
