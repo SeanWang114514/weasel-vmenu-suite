@@ -11,7 +11,7 @@
 --   2) 用 <用户目录>\predict-bigram.txt 查 P(候选首字 | 上文字)：
 --      ≥ STRONG_P 的候选按概率降序提到最前（最多 MAX_PROMOTE 个），
 --      其余候选保持原相对顺序；没有候选过线则整个原样放行（不改 quality）。
---   3) 改了顺序就把缓冲区的 quality 改成严格递减 1000000-k（约束 4）。
+--   3) 只按新顺序 yield 候选，不修改 quality，避免单字权重被抬高。
 --
 -- 数据文件：UTF-8 无 BOM、**LF 换行**的按行文本（用 rb 读，字节偏移才对得上）：
 --     RIMEBI1 <n>
@@ -24,7 +24,7 @@
 --   （pin 置顶、长词提升、收藏固定第 2 位都在它后面，行为不受影响）。
 --
 -- 约束对照（AGENT-HANDOFF §2）：1 不起子进程；2 全链 pcall 兜底、出错原样放行；
---   3 打字路径零磁盘 IO（init 一次性读入）；4 yield 顺序 + quality 严格递减；
+--   3 打字路径零磁盘 IO（init 一次性读入）；4 yield 顺序、不修改候选 quality；
 --   33 不调 set_option。
 local M = {}
 
@@ -227,12 +227,10 @@ function M.func(input, env)
     end
     return
   end
-  local k = 0
+
   for _, idx in ipairs(plan.order) do
     local c = st.buf[idx]
     if c ~= nil then
-      k = k + 1
-      pcall(function() c.quality = 1000000 - k end)
       yield(c)
     end
   end

@@ -637,6 +637,27 @@ preset_color_schemes:
     hilited_comment_text_color: 0xa7a7a9
     hilited_candidate_back_color: 0x594231
 
+  clean_blue_bar:
+    name: "清爽白底／蓝线"
+    author: "Local"
+    color_format: rgba
+    text_color: 0x202124ff
+    back_color: 0xffffffff
+    border_color: 0xdde3eaff
+    shadow_color: 0x00000000
+    label_color: 0x667085ff
+    comment_text_color: 0x667085ff
+    candidate_back_color: 0xffffffff
+    candidate_text_color: 0x202124ff
+    hilited_text_color: 0x202124ff
+    hilited_back_color: 0xffffffff
+    hilited_mark_color: 0x2563ebff
+    hilited_label_color: 0x2563ebff
+    hilited_comment_text_color: 0x475467ff
+    hilited_candidate_text_color: 0x1d4ed8ff
+    hilited_candidate_border_color: 0xeff6ffff
+    hilited_candidate_back_color: 0xeff6ffff
+
   flypy:
     # description: |
     #   小鹤飞扬：白底蓝字，红色高亮。
